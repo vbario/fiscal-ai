@@ -29,6 +29,7 @@ def _price_for(model: str) -> dict[str, float]:
 
 
 _lock = threading.Lock()
+_listeners: list[Any] = []
 _state: dict[str, Any] = {
     "input_tokens": 0,
     "cached_input_tokens": 0,
@@ -88,6 +89,25 @@ def record(model: str, usage: Any) -> None:
         m["reasoning_tokens"] += reasoning
         m["calls"] += 1
         m["usd"] += cost
+        listeners = list(_listeners)
+    for fn in listeners:
+        try:
+            fn(model, cost)
+        except Exception:
+            pass
+
+
+def subscribe(callback) -> None:
+    with _lock:
+        _listeners.append(callback)
+
+
+def unsubscribe(callback) -> None:
+    with _lock:
+        try:
+            _listeners.remove(callback)
+        except ValueError:
+            pass
 
 
 def snapshot() -> dict[str, Any]:

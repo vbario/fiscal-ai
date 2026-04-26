@@ -155,23 +155,39 @@ def _run_company_once(job: Job, name: str) -> None:
         job.emit({"type": "company_error", "company": name, "error": str(e)})
 
 
+def _attach_cost_listener(job: Job):
+    def listener(_model: str, _delta_usd: float) -> None:
+        _emit_cost_if_changed(job)
+
+    cost.subscribe(listener)
+    return listener
+
+
 def _run_job(job: Job):
-    for name in job.companies:
-        _run_company_once(job, name)
-    job.done = True
-    save_job(job)
-    job.emit({"type": "all_done"})
-
-
-def _run_retry(job: Job, name: str) -> None:
-    _run_company_once(job, name)
-    with job.lock:
-        job.running_companies.discard(name)
-        still_running = bool(job.running_companies)
-    if not still_running:
+    listener = _attach_cost_listener(job)
+    try:
+        for name in job.companies:
+            _run_company_once(job, name)
         job.done = True
         save_job(job)
         job.emit({"type": "all_done"})
+    finally:
+        cost.unsubscribe(listener)
+
+
+def _run_retry(job: Job, name: str) -> None:
+    listener = _attach_cost_listener(job)
+    try:
+        _run_company_once(job, name)
+        with job.lock:
+            job.running_companies.discard(name)
+            still_running = bool(job.running_companies)
+        if not still_running:
+            job.done = True
+            save_job(job)
+            job.emit({"type": "all_done"})
+    finally:
+        cost.unsubscribe(listener)
 
 
 @app.post("/api/reports")

@@ -10,7 +10,7 @@ from openai import OpenAI
 from . import cache, cost
 from .config import MODEL, OPENAI_API_KEY, VISION_MODEL
 
-client = OpenAI(api_key=OPENAI_API_KEY, timeout=180.0, max_retries=0)
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=300.0, max_retries=2)
 
 
 def web_search_json(prompt: str, schema: dict, cache_key: Optional[str] = None) -> dict:
