@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fiscal AI — European company financials</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1d2230;
+    --border: #2a3142;
+    --text: #e7eaf0;
+    --muted: #9aa3b2;
+    --accent: #6aa6ff;
+    --accent-2: #8a7bff;
+    --good: #4cd58c;
+    --warn: #f0b649;
+    --bad: #ff6e7d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+    background: linear-gradient(180deg, #181c25, #11141b);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { padding: 20px 24px 60px; max-width: 1500px; margin: 0 auto; }
+
+  .controls { display: flex; gap: 10px; margin-bottom: 18px; }
+  .controls input {
+    flex: 1; padding: 10px 12px; background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; font-size: 14px;
+  }
+  .controls button {
+    padding: 10px 16px; background: var(--accent); color: #0c1322; border: none;
+    border-radius: 8px; font-weight: 600; cursor: pointer;
+  }
+  .controls button:disabled { opacity: .55; cursor: progress; }
+
+  .progress { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+              padding: 12px 14px; margin-bottom: 18px; max-height: 220px; overflow: auto;
+              font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+              color: var(--muted); }
+  .progress .row { display: flex; gap: 8px; padding: 2px 0; }
+  .progress .stage { color: var(--accent); min-width: 130px; }
+  .progress .err { color: var(--bad); }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; flex-wrap: wrap; }
+  .tab {
+    padding: 8px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent;
+    user-select: none;
+  }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  .meta { color: var(--muted); margin: 6px 0 14px; font-size: 13px; }
+  .meta b { color: var(--text); font-weight: 500; }
+
+  table.statement {
+    width: 100%; border-collapse: collapse; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+  }
+  table.statement th, table.statement td {
+    padding: 8px 12px; border-bottom: 1px solid var(--border); text-align: right;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  table.statement th:first-child, table.statement td:first-child { text-align: left; }
+  table.statement thead th {
+    background: var(--panel-2); font-weight: 600; color: var(--text);
+    position: sticky; top: 0; z-index: 1;
+  }
+  table.statement tr.section td {
+    background: rgba(106, 166, 255, 0.08); font-weight: 600; color: var(--text);
+  }
+  table.statement tr.subtotal td { font-weight: 600; border-top: 1px solid var(--border); }
+  table.statement td.label { color: var(--text); }
+  table.statement td.label.indent-1 { padding-left: 28px; color: var(--text); }
+  table.statement td.label.indent-2 { padding-left: 44px; color: var(--muted); }
+  table.statement td.num.neg { color: var(--bad); }
+  table.statement td.num.empty { color: #485066; }
+
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .pill { display: inline-block; background: var(--panel-2); border: 1px solid var(--border);
+          color: var(--muted); padding: 2px 8px; border-radius: 999px; font-size: 11px; }
+  details.raw { margin-top: 16px; }
+  details.raw summary { color: var(--muted); cursor: pointer; }
+  details.raw pre { background: var(--panel); padding: 10px; border-radius: 8px; overflow: auto;
+                    font-size: 11px; max-height: 300px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fiscal AI</h1>
+  <span class="sub">Public-company financial statements, extracted from primary sources</span>
+</header>
+<main>
+  <div class="controls">
+    <input id="companies" placeholder="Company names, comma-separated (e.g., Heineken, Adyen)" />
+    <button id="run">Generate report</button>
+  </div>
+
+  <div class="progress" id="progress" style="display:none"></div>
+
+  <div id="tabs-companies" class="tabs"></div>
+  <div id="result"></div>
+</main>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => [...r.querySelectorAll(s)];
+const STMT_LABELS = {
+  income_statement: "Income Statement",
+  balance_sheet: "Balance Sheet",
+  cash_flow: "Cash Flow Statement",
+};
+
+const state = { jobId: null, results: {}, activeCompany: null, activeStatement: "income_statement" };
+
+$("#run").addEventListener("click", run);
+$("#companies").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+
+async function run() {
+  const raw = $("#companies").value.trim();
+  if (!raw) return;
+  const companies = raw.split(",").map(s => s.trim()).filter(Boolean);
+  if (!companies.length) return;
+
+  state.results = {};
+  state.activeCompany = null;
+  $("#tabs-companies").innerHTML = "";
+  $("#result").innerHTML = "";
+  $("#progress").style.display = "block";
+  $("#progress").innerHTML = "";
+  $("#run").disabled = true;
+
+  const r = await fetch("/api/reports", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({companies}),
+  });
+  const j = await r.json();
+  state.jobId = j.job_id;
+
+  for (const c of companies) addCompanyTab(c);
+  if (companies.length) selectCompany(companies[0]);
+
+  const es = new EventSource(`/api/reports/${j.job_id}/events`);
+  es.addEventListener("progress", e => onProgress(JSON.parse(e.data)));
+  es.addEventListener("company_done", e => onCompanyDone(JSON.parse(e.data)));
+  es.addEventListener("company_error", e => onCompanyError(JSON.parse(e.data)));
+  es.addEventListener("all_done", () => { es.close(); $("#run").disabled = false; });
+}
+
+function addCompanyTab(name) {
+  const t = document.createElement("div");
+  t.className = "tab";
+  t.dataset.company = name;
+  t.innerHTML = `${name} <span class="pill" data-status>queued</span>`;
+  t.addEventListener("click", () => selectCompany(name));
+  $("#tabs-companies").appendChild(t);
+}
+
+function setStatus(name, status) {
+  const tab = $(`#tabs-companies .tab[data-company="${cssEscape(name)}"] [data-status]`);
+  if (tab) tab.textContent = status;
+}
+
+function cssEscape(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/"/g,'\\"'); }
+
+function selectCompany(name) {
+  state.activeCompany = name;
+  $$("#tabs-companies .tab").forEach(t => t.classList.toggle("active", t.dataset.company === name));
+  renderResult();
+}
+
+function onProgress(ev) {
+  const line = document.createElement("div");
+  line.className = "row";
+  const stage = document.createElement("span");
+  stage.className = "stage";
+  stage.textContent = `[${ev.company}] ${ev.stage}`;
+  const detail = document.createElement("span");
+  detail.textContent = summarize(ev.data);
+  line.appendChild(stage); line.appendChild(detail);
+  $("#progress").appendChild(line);
+  $("#progress").scrollTop = $("#progress").scrollHeight;
+  setStatus(ev.company, ev.stage);
+}
+
+function summarize(data) {
+  if (!data) return "";
+  const copy = {...data};
+  delete copy.company;
+  if (copy.info) return `${copy.info.name} (${copy.info.ticker}) — IR: ${copy.info.ir_url}`;
+  if (copy.candidate_count != null) return `${copy.candidate_count} PDFs found`;
+  if (copy.annual_count != null) return `${copy.annual_count} annual reports kept`;
+  if (copy.year != null) return `year ${copy.year}${copy.error ? " — " + copy.error : ""}`;
+  if (copy.message) return copy.message;
+  if (copy.statements_summary) return Object.entries(copy.statements_summary).map(([k,v])=>`${k}:${v}`).join(", ");
+  return "";
+}
+
+async function onCompanyDone(ev) {
+  setStatus(ev.company, "ready");
+  const r = await fetch(`/api/reports/${state.jobId}`);
+  const j = await r.json();
+  state.results = j.results;
+  if (state.activeCompany === ev.company) renderResult();
+}
+
+function onCompanyError(ev) {
+  setStatus(ev.company, "error");
+}
+
+function renderResult() {
+  const el = $("#result");
+  const name = state.activeCompany;
+  if (!name) { el.innerHTML = ""; return; }
+  const data = state.results[name];
+  if (!data) {
+    el.innerHTML = `<div class="meta">Working on ${name}…</div>`;
+    return;
+  }
+  if (data.error) {
+    el.innerHTML = `<div class="meta">Error: ${escapeHtml(data.error)}</div>`;
+    return;
+  }
+  const company = data.company || {};
+  const stmts = data.statements || {};
+
+  let html = `<div class="meta">
+    <b>${escapeHtml(company.name||name)}</b>
+    &middot; ${escapeHtml(company.ticker||"")}
+    &middot; ${escapeHtml(company.exchange||"")}
+    &middot; ${escapeHtml(company.country||"")}
+    &middot; <a href="${escapeAttr(company.ir_url||"#")}" target="_blank" rel="noopener" style="color:var(--accent)">IR site</a>
+  </div>`;
+
+  html += `<div class="tabs" id="tabs-stmt">`;
+  for (const k of Object.keys(STMT_LABELS)) {
+    html += `<div class="tab ${k===state.activeStatement?"active":""}" data-stmt="${k}">${STMT_LABELS[k]}</div>`;
+  }
+  html += `</div>`;
+  html += `<div id="stmt-body"></div>`;
+  html += `<details class="raw"><summary>Raw merged JSON</summary><pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre></details>`;
+  el.innerHTML = html;
+
+  $$("#tabs-stmt .tab").forEach(t => t.addEventListener("click", () => {
+    state.activeStatement = t.dataset.stmt;
+    renderResult();
+  }));
+
+  renderStatement(stmts[state.activeStatement]);
+}
+
+function renderStatement(s) {
+  const body = $("#stmt-body");
+  if (!s || !s.rows || !s.rows.length) {
+    body.innerHTML = `<div class="meta">No data extracted for this statement yet.</div>`;
+    return;
+  }
+  const periods = s.periods || [];
+  const fmt = v => {
+    if (v == null) return {text: "—", cls: "empty"};
+    const n = Number(v);
+    if (!isFinite(n)) return {text: String(v), cls: ""};
+    const abs = Math.abs(n);
+    const text = abs >= 1000 ? n.toLocaleString(undefined, {maximumFractionDigits: 0})
+                              : n.toLocaleString(undefined, {maximumFractionDigits: 2});
+    return {text, cls: n < 0 ? "neg" : ""};
+  };
+
+  let html = `<div class="meta">Currency: <b>${escapeHtml(s.currency||"?")}</b> &middot; Unit: <b>${escapeHtml(s.unit||"")}</b></div>`;
+  html += `<table class="statement"><thead><tr><th></th>`;
+  for (const p of periods) {
+    html += `<th>${escapeHtml(p.label || p.period_end)}</th>`;
+  }
+  html += `</tr></thead><tbody>`;
+  for (const r of s.rows) {
+    const cls = [];
+    if (r.is_section_header) cls.push("section");
+    if (r.is_subtotal) cls.push("subtotal");
+    const indent = Math.min(r.indent_level||0, 2);
+    html += `<tr class="${cls.join(" ")}">`;
+    html += `<td class="label indent-${indent}">${escapeHtml(r.label)}</td>`;
+    for (const v of r.values) {
+      const f = fmt(v);
+      html += `<td class="num ${f.cls}">${escapeHtml(f.text)}</td>`;
+    }
+    html += `</tr>`;
+  }
+  html += `</tbody></table>`;
+  html += `<div class="note">Each cell is the most recent restatement available for that period across the company's annual reports.</div>`;
+  body.innerHTML = html;
+}
+
+function escapeHtml(s){ return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function escapeAttr(s){ return escapeHtml(s); }
+</script>
+</body>
+</html>

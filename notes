@@ -1,0 +1,19 @@
+** Let's create an app that researches information about public European companies and compiles a report **
+
+I should be able to enter the name of a company, or multiple companies.
+
+First, find basic company info (e.g., name, ticker, investor relations website).
+
+Then, for each company:
+
+1. Scrape/classify the PDFs on the company’s investor relations website
+2. Parse the company’s Annual reports for the big three statements (Income Statement, Balance Sheet, & Cash Flow Statement) with the aim to extract all data exactly as the company reports it
+3. Compile the data from multiple reports into one clean view for 10 years of data for every statement
+
+Output:
+The output here is a table for every statement with 10 years of data, e.g., Tesla’s Income Statement
+
+Notes:
+
+- When creating the clean view, a lot of similarly named items will create a massive and cluttered table, so it’s best to deduplicate and order things to align with the company’s latest reporting
+- When extracting from the 2024 report for example, it often contains data for 2023 and 2022, which restate the 2023 and 2022 report data and is therefore more up to date and important. If you extract every column of data from every report, you can use the latest data for every period.
