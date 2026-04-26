@@ -17,6 +17,23 @@
     --good: #4cd58c;
     --warn: #f0b649;
     --bad: #ff6e7d;
+    --header-bg: linear-gradient(180deg, #181c25, #11141b);
+    --button-text: #0c1322;
+  }
+  body[data-theme="light"] {
+    --bg: #f7f8fb;
+    --panel: #ffffff;
+    --panel-2: #eef2f7;
+    --border: #d9e0ec;
+    --text: #151923;
+    --muted: #5f6c7d;
+    --accent: #2f6ec9;
+    --accent-2: #5c55d6;
+    --good: #138a51;
+    --warn: #a26500;
+    --bad: #c93748;
+    --header-bg: #ffffff;
+    --button-text: #ffffff;
   }
   * { box-sizing: border-box; }
   body {
@@ -27,7 +44,7 @@
   header {
     padding: 18px 24px; border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 16px;
-    background: linear-gradient(180deg, #181c25, #11141b);
+    background: var(--header-bg);
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
   header .sub { color: var(--muted); font-size: 12px; }
@@ -56,6 +73,16 @@
   .cost:hover .details { display: block; }
   .cost .details .row { display: flex; justify-content: space-between; padding: 2px 0; }
   .cost .details .row b { color: var(--text); font-weight: 500; }
+  .saved-select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 8px; font-size: 12px;
+  }
+  .theme-toggle {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .theme-toggle:hover { border-color: var(--accent); }
   main { padding: 20px 24px 60px; max-width: 1500px; margin: 0 auto; }
 
   .controls { display: flex; gap: 10px; margin-bottom: 18px; }
@@ -64,7 +91,7 @@
     border: 1px solid var(--border); border-radius: 8px; font-size: 14px;
   }
   .controls button {
-    padding: 10px 16px; background: var(--accent); color: #0c1322; border: none;
+    padding: 10px 16px; background: var(--accent); color: var(--button-text); border: none;
     border-radius: 8px; font-weight: 600; cursor: pointer;
   }
   .controls button:disabled { opacity: .55; cursor: progress; }
@@ -75,7 +102,19 @@
               color: var(--muted); }
   .progress .row { display: flex; gap: 8px; padding: 2px 0; }
   .progress .stage { color: var(--accent); min-width: 130px; }
+  .progress .cost-line .stage { color: var(--good); }
   .progress .err { color: var(--bad); }
+  .statusbar {
+    display: none; align-items: center; gap: 10px;
+    color: var(--muted); margin: -6px 0 14px; font-size: 13px;
+  }
+  .statusbar.active { display: flex; }
+  .spinner {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    animation: spin .85s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; flex-wrap: wrap; }
   .tab {
@@ -86,6 +125,12 @@
 
   .meta { color: var(--muted); margin: 6px 0 14px; font-size: 13px; }
   .meta b { color: var(--text); font-weight: 500; }
+  .meta-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .export {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 5px 9px; cursor: pointer; font-size: 12px;
+  }
+  .export:hover { border-color: var(--accent); }
 
   table.statement {
     width: 100%; border-collapse: collapse; background: var(--panel);
@@ -124,6 +169,7 @@
   <h1>Fiscal AI</h1>
   <span class="sub">Public-company financial statements, extracted from primary sources</span>
   <div class="spacer"></div>
+  <button class="theme-toggle" id="theme" type="button" aria-label="Toggle theme"></button>
   <div class="cost" id="cost" title="Estimated OpenAI spend this session">
     <span class="label">spend</span>
     <span class="amount" id="cost-amount">$0.0000</span>
@@ -137,8 +183,13 @@
     <input id="companies" placeholder="Company names, comma-separated (e.g., Heineken, Adyen)" />
     <button id="run">Generate report</button>
   </div>
+  <div class="controls" id="saved-row" style="display:none">
+    <select class="saved-select" id="saved-reports"></select>
+    <button id="load-saved" type="button">Load saved report</button>
+  </div>
 
   <div class="progress" id="progress" style="display:none"></div>
+  <div class="statusbar" id="statusbar"><span class="spinner"></span><span id="status-text">Working…</span></div>
 
   <div id="tabs-companies" class="tabs"></div>
   <div id="result"></div>
@@ -153,10 +204,33 @@ const STMT_LABELS = {
   cash_flow: "Cash Flow Statement",
 };
 
-const state = { jobId: null, results: {}, activeCompany: null, activeStatement: "income_statement" };
+const state = {
+  jobId: null,
+  results: {},
+  activeCompany: null,
+  activeStatement: "income_statement",
+  running: false,
+  cost: null,
+  savedReports: [],
+  eventCount: 0,
+  eventSource: null,
+};
 
 $("#run").addEventListener("click", run);
 $("#companies").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+$("#load-saved").addEventListener("click", loadSelectedSavedReport);
+$("#theme").addEventListener("click", () => {
+  setTheme(document.body.dataset.theme === "light" ? "dark" : "light");
+});
+
+function setTheme(theme) {
+  const next = theme === "light" ? "light" : "dark";
+  document.body.dataset.theme = next;
+  $("#theme").textContent = next === "light" ? "☀️" : "🌙";
+  localStorage.setItem("fiscal-theme", next);
+}
+
+setTheme(localStorage.getItem("fiscal-theme") || "dark");
 
 async function run() {
   const raw = $("#companies").value.trim();
@@ -166,11 +240,13 @@ async function run() {
 
   state.results = {};
   state.activeCompany = null;
+  state.running = true;
   $("#tabs-companies").innerHTML = "";
   $("#result").innerHTML = "";
   $("#progress").style.display = "block";
   $("#progress").innerHTML = "";
   $("#run").disabled = true;
+  updateStatus("Starting report…");
 
   const r = await fetch("/api/reports", {
     method: "POST",
@@ -179,15 +255,44 @@ async function run() {
   });
   const j = await r.json();
   state.jobId = j.job_id;
+  state.eventCount = 0;
 
   for (const c of companies) addCompanyTab(c);
   if (companies.length) selectCompany(companies[0]);
 
-  const es = new EventSource(`/api/reports/${j.job_id}/events`);
-  es.addEventListener("progress", e => onProgress(JSON.parse(e.data)));
-  es.addEventListener("company_done", e => onCompanyDone(JSON.parse(e.data)));
-  es.addEventListener("company_error", e => onCompanyError(JSON.parse(e.data)));
-  es.addEventListener("all_done", () => { es.close(); $("#run").disabled = false; });
+  openEventStream(j.job_id, 0);
+}
+
+function openEventStream(jobId, since) {
+  if (state.eventSource) state.eventSource.close();
+  const es = new EventSource(`/api/reports/${jobId}/events?since=${since || 0}`);
+  state.eventSource = es;
+  es.addEventListener("progress", e => { state.eventCount += 1; onProgress(JSON.parse(e.data)); });
+  es.addEventListener("cost_update", e => { state.eventCount += 1; onCostUpdate(JSON.parse(e.data)); });
+  es.addEventListener("company_done", e => { state.eventCount += 1; onCompanyDone(JSON.parse(e.data)); });
+  es.addEventListener("company_error", e => { state.eventCount += 1; onCompanyError(JSON.parse(e.data)); });
+  es.addEventListener("retry_started", e => { state.eventCount += 1; onRetryStarted(JSON.parse(e.data)); });
+  es.addEventListener("all_done", async () => {
+    state.eventCount += 1;
+    es.close();
+    if (state.eventSource === es) state.eventSource = null;
+    $("#run").disabled = false;
+    state.running = false;
+    await refreshCurrentReport();
+    updateStatus("");
+    loadSavedReports();
+  });
+}
+
+function updateStatus(text) {
+  const bar = $("#statusbar");
+  if (!text || !state.running) {
+    bar.classList.remove("active");
+    $("#status-text").textContent = "";
+    return;
+  }
+  $("#status-text").textContent = text;
+  bar.classList.add("active");
 }
 
 function addCompanyTab(name) {
@@ -213,17 +318,26 @@ function selectCompany(name) {
 }
 
 function onProgress(ev) {
+  appendConsole(`[${ev.company}] ${ev.stage}`, summarize(ev.data), ev.data && ev.data.error);
+  setStatus(ev.company, ev.stage);
+  if (state.activeCompany === ev.company && !state.results[ev.company]) {
+    renderResult();
+  }
+  if (ev.data && ev.data.message) updateStatus(`${ev.company}: ${ev.data.message}`);
+}
+
+function appendConsole(stageText, detailText, isError=false, cls="") {
   const line = document.createElement("div");
-  line.className = "row";
+  line.className = `row ${cls || ""}`;
   const stage = document.createElement("span");
   stage.className = "stage";
-  stage.textContent = `[${ev.company}] ${ev.stage}`;
+  stage.textContent = stageText;
   const detail = document.createElement("span");
-  detail.textContent = summarize(ev.data);
+  if (isError) detail.className = "err";
+  detail.textContent = detailText || "";
   line.appendChild(stage); line.appendChild(detail);
   $("#progress").appendChild(line);
   $("#progress").scrollTop = $("#progress").scrollHeight;
-  setStatus(ev.company, ev.stage);
 }
 
 function summarize(data) {
@@ -233,22 +347,49 @@ function summarize(data) {
   if (copy.info) return `${copy.info.name} (${copy.info.ticker}) — IR: ${copy.info.ir_url}`;
   if (copy.candidate_count != null) return `${copy.candidate_count} PDFs found`;
   if (copy.annual_count != null) return `${copy.annual_count} annual reports kept`;
+  if (copy.chunk != null && copy.classified_count != null) return `chunk ${copy.chunk}/${copy.chunks}: ${copy.classified_count} PDFs classified`;
+  if (copy.chunk != null && copy.attempt != null) return `chunk ${copy.chunk}/${copy.chunks}: retry ${copy.attempt} — ${copy.error || ""}`;
+  if (copy.chunk != null && copy.count != null) return `chunk ${copy.chunk}/${copy.chunks}: fallback classified ${copy.count} PDFs${copy.error ? " — " + copy.error : ""}`;
+  if (copy.chunk != null) return `chunk ${copy.chunk}/${copy.chunks}: ${copy.count || 0} PDFs`;
   if (copy.year != null) return `year ${copy.year}${copy.error ? " — " + copy.error : ""}`;
   if (copy.message) return copy.message;
   if (copy.statements_summary) return Object.entries(copy.statements_summary).map(([k,v])=>`${k}:${v}`).join(", ");
+  if (copy.found) return Object.entries(copy.found).map(([k,v])=>`${k}:${v ? "found" : "missing"}`).join(", ");
   return "";
+}
+
+function onCostUpdate(ev) {
+  const c = ev.cost || {};
+  appendConsole("[cost]", `+${fmtUsd(ev.delta_usd || 0)} · total ${fmtUsd(c.usd || 0)} · ${fmtTokens(c.input_tokens)} in / ${fmtTokens(c.output_tokens)} out`, false, "cost-line");
+  renderCost(c);
+}
+
+function onRetryStarted(ev) {
+  setStatus(ev.company, "retrying");
+  appendConsole(`[${ev.company}] retry`, "Manual retry started");
+  updateStatus(`${ev.company}: retrying report…`);
 }
 
 async function onCompanyDone(ev) {
   setStatus(ev.company, "ready");
-  const r = await fetch(`/api/reports/${state.jobId}`);
-  const j = await r.json();
-  state.results = j.results;
+  await refreshCurrentReport();
   if (state.activeCompany === ev.company) renderResult();
 }
 
-function onCompanyError(ev) {
+async function onCompanyError(ev) {
   setStatus(ev.company, "error");
+  appendConsole(`[${ev.company}] error`, ev.error || "Report failed", true);
+  await refreshCurrentReport();
+  if (state.activeCompany === ev.company) renderResult();
+}
+
+async function refreshCurrentReport() {
+  if (!state.jobId) return null;
+  const r = await fetch(`/api/reports/${state.jobId}`);
+  if (!r.ok) return null;
+  const j = await r.json();
+  state.results = j.results || {};
+  return j;
 }
 
 function renderResult() {
@@ -257,22 +398,28 @@ function renderResult() {
   if (!name) { el.innerHTML = ""; return; }
   const data = state.results[name];
   if (!data) {
-    el.innerHTML = `<div class="meta">Working on ${name}…</div>`;
+    el.innerHTML = `<div class="meta"><span class="spinner" style="display:inline-block;vertical-align:-2px;margin-right:8px"></span>Working on ${name}…</div>`;
     return;
   }
   if (data.error) {
-    el.innerHTML = `<div class="meta">Error: ${escapeHtml(data.error)}</div>`;
+    el.innerHTML = `<div class="meta meta-actions">
+      <span>Error: ${escapeHtml(data.error)}</span>
+      <button class="export" id="retry-company" type="button">Retry</button>
+    </div>`;
+    $("#retry-company").addEventListener("click", retryActiveCompany);
     return;
   }
   const company = data.company || {};
   const stmts = data.statements || {};
 
-  let html = `<div class="meta">
-    <b>${escapeHtml(company.name||name)}</b>
-    &middot; ${escapeHtml(company.ticker||"")}
-    &middot; ${escapeHtml(company.exchange||"")}
-    &middot; ${escapeHtml(company.country||"")}
-    &middot; <a href="${escapeAttr(company.ir_url||"#")}" target="_blank" rel="noopener" style="color:var(--accent)">IR site</a>
+  let html = `<div class="meta meta-actions">
+    <span><b>${escapeHtml(company.name||name)}</b>
+      &middot; ${escapeHtml(company.ticker||"")}
+      &middot; ${escapeHtml(company.exchange||"")}
+      &middot; ${escapeHtml(company.country||"")}
+      &middot; <a href="${escapeAttr(company.ir_url||"#")}" target="_blank" rel="noopener" style="color:var(--accent)">IR site</a>
+    </span>
+    <button class="export" id="export-pdf" type="button">Export PDF</button>
   </div>`;
 
   html += `<div class="tabs" id="tabs-stmt">`;
@@ -288,8 +435,43 @@ function renderResult() {
     state.activeStatement = t.dataset.stmt;
     renderResult();
   }));
+  $("#export-pdf").addEventListener("click", exportActiveCompany);
 
   renderStatement(stmts[state.activeStatement]);
+}
+
+function exportActiveCompany() {
+  if (!state.jobId || !state.activeCompany) return;
+  const url = `/api/reports/${encodeURIComponent(state.jobId)}/companies/${encodeURIComponent(state.activeCompany)}/export.pdf`;
+  window.open(url, "_blank", "noopener");
+}
+
+async function retryActiveCompany() {
+  if (!state.jobId || !state.activeCompany || state.running) return;
+  const company = state.activeCompany;
+  const btn = $("#retry-company");
+  if (btn) btn.disabled = true;
+  state.running = true;
+  state.results[company] = null;
+  setStatus(company, "retrying");
+  renderResult();
+  updateStatus(`${company}: retrying report…`);
+
+  try {
+    const r = await fetch(`/api/reports/${encodeURIComponent(state.jobId)}/companies/${encodeURIComponent(company)}/retry`, {method: "POST"});
+    if (!r.ok) {
+      const msg = await r.text();
+      throw new Error(msg || `Retry failed with ${r.status}`);
+    }
+    const j = await r.json();
+    openEventStream(state.jobId, j.event_count ?? state.eventCount);
+  } catch (err) {
+    state.running = false;
+    state.results[company] = {error: err.message || String(err)};
+    setStatus(company, "error");
+    updateStatus("");
+    renderResult();
+  }
 }
 
 function renderStatement(s) {
@@ -348,33 +530,41 @@ function fmtUsd(n) {
   return "$" + n.toFixed(4);
 }
 
+function renderCost(j) {
+  state.cost = j;
+  $("#cost-amount").textContent = fmtUsd(j.usd);
+  $("#cost-tokens").textContent =
+    `${fmtTokens(j.input_tokens)} in / ${fmtTokens(j.output_tokens)} out`;
+  const det = $("#cost-details");
+  const rows = [
+    ["Calls",            j.calls],
+    ["Input tokens",     j.input_tokens.toLocaleString()],
+    ["  cached",         (j.cached_input_tokens||0).toLocaleString()],
+    ["Output tokens",    j.output_tokens.toLocaleString()],
+    ["  reasoning",      (j.reasoning_tokens||0).toLocaleString()],
+    ["Estimated cost",   fmtUsd(j.usd)],
+  ];
+  let html = rows.map(([k,v]) => `<div class="row"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`).join("");
+  const models = Object.keys(j.by_model || {});
+  if (models.length) {
+    html += `<div class="row" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px"><span>By model</span><b></b></div>`;
+    for (const m of models) {
+      const mm = j.by_model[m];
+      html += `<div class="row"><span>${escapeHtml(m)}</span><b>${fmtUsd(mm.usd)} · ${fmtTokens(mm.input_tokens)}/${fmtTokens(mm.output_tokens)}</b></div>`;
+    }
+  }
+  det.innerHTML = html;
+}
+
 async function refreshCost() {
   try {
     const r = await fetch("/api/cost");
     if (!r.ok) return;
     const j = await r.json();
-    $("#cost-amount").textContent = fmtUsd(j.usd);
-    $("#cost-tokens").textContent =
-      `${fmtTokens(j.input_tokens)} in / ${fmtTokens(j.output_tokens)} out`;
-    const det = $("#cost-details");
-    const rows = [
-      ["Calls",            j.calls],
-      ["Input tokens",     j.input_tokens.toLocaleString()],
-      ["  cached",         (j.cached_input_tokens||0).toLocaleString()],
-      ["Output tokens",    j.output_tokens.toLocaleString()],
-      ["  reasoning",      (j.reasoning_tokens||0).toLocaleString()],
-      ["Estimated cost",   fmtUsd(j.usd)],
-    ];
-    let html = rows.map(([k,v]) => `<div class="row"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`).join("");
-    const models = Object.keys(j.by_model || {});
-    if (models.length) {
-      html += `<div class="row" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px"><span>By model</span><b></b></div>`;
-      for (const m of models) {
-        const mm = j.by_model[m];
-        html += `<div class="row"><span>${escapeHtml(m)}</span><b>${fmtUsd(mm.usd)} · ${fmtTokens(mm.input_tokens)}/${fmtTokens(mm.output_tokens)}</b></div>`;
-      }
+    if (state.running && state.cost && Number(j.usd || 0) > Number(state.cost.usd || 0)) {
+      appendConsole("[cost]", `+${fmtUsd(Number(j.usd || 0) - Number(state.cost.usd || 0))} · total ${fmtUsd(j.usd)}`, false, "cost-line");
     }
-    det.innerHTML = html;
+    renderCost(j);
   } catch (_) {}
 }
 
@@ -385,6 +575,81 @@ $("#cost-reset").addEventListener("click", async () => {
 
 refreshCost();
 setInterval(refreshCost, 2000);
+
+async function loadSavedReports() {
+  try {
+    const r = await fetch("/api/reports");
+    if (!r.ok) return;
+    const j = await r.json();
+    state.savedReports = j.reports || [];
+    const row = $("#saved-row");
+    const select = $("#saved-reports");
+    select.innerHTML = "";
+    for (const report of state.savedReports) {
+      const opt = document.createElement("option");
+      opt.value = report.job_id;
+      const when = report.updated_at ? new Date(report.updated_at).toLocaleString() : report.job_id;
+      opt.textContent = `${when} · ${report.companies.join(", ")}${report.done ? "" : " · running"}`;
+      select.appendChild(opt);
+    }
+    row.style.display = state.savedReports.length ? "flex" : "none";
+    if (state.savedReports.length && !state.jobId) {
+      select.value = state.savedReports[0].job_id;
+      await loadSelectedSavedReport();
+    }
+  } catch (_) {}
+}
+
+async function loadSelectedSavedReport() {
+  const jobId = $("#saved-reports").value;
+  if (!jobId) return;
+  const r = await fetch(`/api/reports/${jobId}?include_events=1`);
+  if (!r.ok) return;
+  const j = await r.json();
+  state.jobId = j.job_id;
+  state.results = j.results || {};
+  state.running = !j.done;
+  state.eventCount = (j.events || []).length;
+  $("#tabs-companies").innerHTML = "";
+  $("#progress").style.display = "block";
+  $("#progress").innerHTML = "";
+  for (const c of (j.companies || Object.keys(state.results))) addCompanyTab(c);
+  const first = (j.companies || Object.keys(state.results))[0];
+  if (first) selectCompany(first);
+  appendConsole("[saved]", `Loaded saved report ${jobId}`);
+  replayEvents(j.events || []);
+  updateStatus(state.running ? "Saved job is still marked running. Refreshing result…" : "");
+  if (!j.done) {
+    openEventStream(jobId, state.eventCount);
+  }
+}
+
+function replayEvents(events) {
+  const latestStatus = {};
+  for (const ev of events) {
+    if (ev.type === "progress") {
+      appendConsole(`[${ev.company}] ${ev.stage}`, summarize(ev.data), ev.data && ev.data.error);
+      latestStatus[ev.company] = ev.stage;
+    } else if (ev.type === "cost_update") {
+      onCostUpdate(ev);
+    } else if (ev.type === "company_done") {
+      latestStatus[ev.company] = "ready";
+    } else if (ev.type === "company_error") {
+      appendConsole(`[${ev.company}] error`, ev.error || "Report failed", true);
+      latestStatus[ev.company] = "error";
+    } else if (ev.type === "retry_started") {
+      appendConsole(`[${ev.company}] retry`, "Manual retry started");
+      latestStatus[ev.company] = "retrying";
+    } else if (ev.type === "all_done") {
+      appendConsole("[done]", "All companies complete");
+    }
+  }
+  for (const [company, status] of Object.entries(latestStatus)) {
+    setStatus(company, status);
+  }
+}
+
+loadSavedReports();
 </script>
 </body>
 </html>

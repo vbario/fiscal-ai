@@ -25,7 +25,11 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
     emit("crawled", candidate_count=len(candidates))
 
     emit("classifying", message=f"Classifying {len(candidates)} PDFs…")
-    classified = pdf_finder.classify_pdfs(info["name"], candidates)
+    classified = pdf_finder.classify_pdfs(
+        info["name"],
+        candidates,
+        on_progress=lambda stage, fields: emit(stage, **fields),
+    )
     annuals = pdf_finder.annual_reports(classified)[:MAX_REPORTS]
     emit("classified", annual_count=len(annuals), annuals=[{"year": a.get("fiscal_year"), "url": a["url"]} for a in annuals])
 
@@ -37,8 +41,17 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
 
     def _process(a: dict):
         year = a["fiscal_year"]
+        emit("downloading", year=year, message=f"Downloading annual report {year}…", url=a["url"])
         path = pdf_finder.download_pdf(a["url"])
-        return year, extractor.extract_all(path)
+        emit("downloaded", year=year, message=f"Downloaded annual report {year}.")
+        emit("extracting", year=year, message=f"Finding and extracting statements for {year}…")
+        ext = extractor.extract_all(path)
+        found = {
+            stmt: bool(data and data.get("line_items"))
+            for stmt, data in ext.items()
+        }
+        emit("extracted", year=year, found=found)
+        return year, ext
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(_process, a): a for a in annuals}
@@ -47,7 +60,7 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
             try:
                 year, ext = fut.result()
                 extractions[year] = ext
-                emit("extracted", year=year)
+                emit("year_complete", year=year)
             except Exception as e:
                 emit("extract_error", year=a.get("fiscal_year"), error=str(e), trace=traceback.format_exc(limit=2))
 

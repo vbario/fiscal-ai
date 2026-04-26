@@ -4,7 +4,9 @@ from __future__ import annotations
 import html
 import hashlib
 import re
+import time
 from pathlib import Path
+from typing import Callable
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
@@ -20,6 +22,12 @@ HEADERS = {"User-Agent": UA, "Accept": "text/html,application/pdf,*/*"}
 MAX_PAGES = 12
 # Max PDFs we'll bother classifying.
 MAX_CANDIDATES = 60
+# Keep classification prompts small enough that one slow response does not kill
+# the whole report generation.
+CLASSIFY_CHUNK_SIZE = 15
+CLASSIFY_RETRIES = 0
+
+ProgressFn = Callable[[str, dict], None]
 
 
 def _host(url: str) -> str:
@@ -206,11 +214,7 @@ CLASSIFY_SCHEMA = {
 }
 
 
-def classify_pdfs(company_name: str, candidates: list[dict]) -> list[dict]:
-    """Ask the LLM to classify each candidate PDF based on its URL + anchor text."""
-    if not candidates:
-        return []
-
+def _classify_chunk(company_name: str, candidates: list[dict]) -> list[dict]:
     key = "classify:" + hashlib.sha256(
         (company_name + "|" + "|".join(sorted(c["url"] for c in candidates))).encode()
     ).hexdigest()
@@ -238,6 +242,112 @@ def classify_pdfs(company_name: str, candidates: list[dict]) -> list[dict]:
         if not meta:
             continue
         enriched.append({**c, **meta})
+    return enriched
+
+
+def _infer_year(text: str) -> int | None:
+    years = [int(y) for y in re.findall(r"\b(20[0-3]\d|19[8-9]\d)\b", text)]
+    if not years:
+        return None
+    currentish = [y for y in years if 1990 <= y <= 2035]
+    return max(currentish) if currentish else None
+
+
+def _heuristic_classify(candidates: list[dict]) -> list[dict]:
+    """Best-effort local classification when an LLM chunk repeatedly fails."""
+    enriched: list[dict] = []
+    for c in candidates:
+        text = f"{c.get('url', '')} {c.get('anchor_text', '')} {c.get('source_page', '')}"
+        low = text.lower()
+        kind = "other"
+        if re.search(r"sustainability|esg|impact|responsibility", low):
+            kind = "sustainability"
+        elif re.search(r"governance|remuneration", low):
+            kind = "governance"
+        elif re.search(r"press[- ]release|media[- ]release", low):
+            kind = "press_release"
+        elif re.search(r"presentation|slides|deck", low):
+            kind = "results_presentation"
+        elif re.search(r"half[- ]year|interim|q[1-4]|quarter", low):
+            kind = "interim_report"
+        elif re.search(
+            r"annual[- ]report|integrated[- ]report|annual[- ]review|universal[- ]registration|"
+            r"registration[- ]document|full[- ]year|year[- ]end|shareholder[- ]letter",
+            low,
+        ):
+            kind = "annual_report"
+
+        enriched.append(
+            {
+                **c,
+                "kind": kind,
+                "fiscal_year": _infer_year(text),
+                "language": "en" if re.search(r"\b(en|english)\b", low) else None,
+                "title": c.get("anchor_text") or None,
+            }
+        )
+    return enriched
+
+
+def classify_pdfs(company_name: str, candidates: list[dict], on_progress: ProgressFn | None = None) -> list[dict]:
+    """Classify candidate PDFs in small, retried chunks."""
+    if not candidates:
+        return []
+
+    chunks = [
+        candidates[i : i + CLASSIFY_CHUNK_SIZE]
+        for i in range(0, len(candidates), CLASSIFY_CHUNK_SIZE)
+    ]
+    enriched: list[dict] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        if on_progress:
+            on_progress(
+                "classifying_chunk",
+                {"chunk": idx, "chunks": len(chunks), "count": len(chunk)},
+            )
+
+        last_error: Exception | None = None
+        for attempt in range(1, CLASSIFY_RETRIES + 2):
+            try:
+                part = _classify_chunk(company_name, chunk)
+                enriched.extend(part)
+                if on_progress:
+                    on_progress(
+                        "classified_chunk",
+                        {
+                            "chunk": idx,
+                            "chunks": len(chunks),
+                            "classified_count": len(part),
+                        },
+                    )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt <= CLASSIFY_RETRIES:
+                    if on_progress:
+                        on_progress(
+                            "classify_retry",
+                            {
+                                "chunk": idx,
+                                "chunks": len(chunks),
+                                "attempt": attempt + 1,
+                                "error": str(exc),
+                            },
+                        )
+                    time.sleep(1.5 * attempt)
+                else:
+                    fallback = _heuristic_classify(chunk)
+                    enriched.extend(fallback)
+                    if on_progress:
+                        on_progress(
+                            "classify_fallback",
+                            {
+                                "chunk": idx,
+                                "chunks": len(chunks),
+                                "count": len(fallback),
+                                "error": str(last_error) if last_error else "classification failed",
+                            },
+                        )
     return enriched
 
 
