@@ -105,14 +105,110 @@ def _candidate_score(c: dict) -> tuple[int, str]:
     return (-score, c.get("url", ""))
 
 
-def _fetch(client: httpx.Client, url: str) -> httpx.Response | None:
+_GATE_PATH_RE = re.compile(r"/(age[-_ ]?gate|age[-_ ]?verification|age[-_ ]?check)\b", re.I)
+_GATE_HINTS = ("age-gate", "age_gate", "age verification", "date of birth", "verify your age")
+
+
+def _looks_like_gate(response: httpx.Response) -> bool:
+    if _GATE_PATH_RE.search(str(response.url)):
+        return True
+    body = response.text.lower()
+    if "<form" not in body:
+        return False
+    return any(h in body for h in _GATE_HINTS)
+
+
+def _pass_gate(client: httpx.Client, response: httpx.Response) -> bool:
+    """If the response is an age/consent gate, submit it with adult defaults."""
+    try:
+        soup = BeautifulSoup(response.text, "html.parser")
+    except Exception:
+        return False
+    form = None
+    for f in soup.find_all("form"):
+        cls = " ".join(f.get("class") or []).lower()
+        action = (f.get("action") or "").lower()
+        fid = (f.get("id") or "").lower()
+        haystack = f"{cls} {action} {fid}"
+        if "age" in haystack or "gate" in haystack or "verify" in haystack:
+            form = f
+            break
+    if form is None:
+        # Fall back to any form on a gate-path URL.
+        if not _GATE_PATH_RE.search(str(response.url)):
+            return False
+        form = soup.find("form")
+        if form is None:
+            return False
+
+    action_url = urljoin(str(response.url), form.get("action") or str(response.url))
+    method = (form.get("method") or "post").lower()
+    data: dict[str, str] = {}
+    for el in form.find_all(["input", "select", "textarea"]):
+        name = el.get("name")
+        if not name:
+            continue
+        low = name.lower()
+        if el.name == "select":
+            opts = el.find_all("option")
+            chosen = next((o.get("value") for o in opts if o.has_attr("selected")), None)
+            if chosen is None:
+                chosen = next(
+                    (o.get("value") for o in opts if (o.get("value") or "").strip()),
+                    "",
+                )
+            if "country" in low:
+                chosen = "NL"
+            data[name] = chosen
+            continue
+        itype = (el.get("type") or "text").lower()
+        if itype in ("button", "image", "reset"):
+            continue
+        if "day" in low:
+            data[name] = "1"
+        elif "month" in low:
+            data[name] = "1"
+        elif "year" in low and "form" not in low:
+            data[name] = "1980"
+        elif itype == "checkbox":
+            data[name] = el.get("value") or "1"
+        elif itype == "radio":
+            if el.has_attr("checked") and name not in data:
+                data[name] = el.get("value") or ""
+        elif itype == "submit":
+            if "op" not in data:
+                data[name] = el.get("value") or "Enter"
+        else:
+            value = el.get("value") or ""
+            if value.lower().startswith("replace with"):
+                value = ""
+            data[name] = value
+    try:
+        if method == "post":
+            client.post(action_url, data=data, headers=HEADERS, follow_redirects=True, timeout=30)
+        else:
+            client.get(action_url, params=data, headers=HEADERS, follow_redirects=True, timeout=30)
+        return True
+    except Exception:
+        return False
+
+
+def _fetch(client: httpx.Client, url: str, _gates_passed: set[str] | None = None) -> httpx.Response | None:
     try:
         r = client.get(url, headers=HEADERS, follow_redirects=True, timeout=30)
-        if r.status_code == 200:
-            return r
+        if r.status_code != 200:
+            return None
+        if _gates_passed is not None and _looks_like_gate(r):
+            host = _host(str(r.url))
+            if host not in _gates_passed:
+                _gates_passed.add(host)
+                if _pass_gate(client, r):
+                    r2 = client.get(url, headers=HEADERS, follow_redirects=True, timeout=30)
+                    if r2.status_code == 200:
+                        return r2
+        return r
     except Exception:
         return None
-    return None
 
 
 def crawl_pdfs(ir_url: str, reports_url: str | None = None) -> list[dict]:
@@ -130,13 +226,14 @@ def crawl_pdfs(ir_url: str, reports_url: str | None = None) -> list[dict]:
         re.I,
     )
 
-    with httpx.Client() as client:
+    gates_passed: set[str] = set()
+    with httpx.Client(cookies=httpx.Cookies()) as client:
         while queue and len(seen_pages) < MAX_PAGES:
             url = queue.pop(0)
             if url in seen_pages:
                 continue
             seen_pages.add(url)
-            r = _fetch(client, url)
+            r = _fetch(client, url, gates_passed)
             if not r or "html" not in r.headers.get("content-type", ""):
                 continue
             soup = BeautifulSoup(r.text, "html.parser")
@@ -349,6 +446,79 @@ def classify_pdfs(company_name: str, candidates: list[dict], on_progress: Progre
                             },
                         )
     return enriched
+
+
+WEB_FALLBACK_SCHEMA = {
+    "type": "object",
+    "required": ["pdfs"],
+    "properties": {
+        "pdfs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["url", "fiscal_year"],
+                "properties": {
+                    "url": {"type": "string"},
+                    "fiscal_year": {"type": "integer"},
+                    "title": {"type": ["string", "null"]},
+                    "language": {"type": ["string", "null"]},
+                },
+            },
+        }
+    },
+}
+
+
+def web_search_annual_reports(company_name: str, ir_url: str | None = None, max_years: int = 10) -> list[dict]:
+    """Ask the LLM to find direct annual-report PDF URLs when the crawler fails."""
+    site_hint = f" Their investor relations site is {ir_url}." if ir_url else ""
+    prompt = (
+        f"Find direct PDF download URLs for the most recent {max_years} annual reports of the public company "
+        f"'{company_name}'.{site_hint} Prefer the official annual report (integrated annual report, "
+        "universal registration document, full annual report, or annual review) that contains the audited "
+        "consolidated financial statements. Return one PDF per fiscal year, English version when available. "
+        "Each url MUST be a direct .pdf link that downloads a file. Do NOT return sustainability-only or "
+        "ESG-only reports, half-year/interim reports, presentations, or press releases."
+    )
+    out = llm.web_search_json(
+        prompt,
+        WEB_FALLBACK_SCHEMA,
+        cache_key="web_pdfs:" + hashlib.sha256(f"{company_name}|{ir_url}|{max_years}".encode()).hexdigest(),
+    )
+    pdfs = out.get("pdfs", []) or []
+    enriched: list[dict] = []
+    for p in pdfs:
+        url = (p.get("url") or "").strip()
+        if not url.lower().endswith(".pdf") and ".pdf" not in url.lower():
+            continue
+        enriched.append({
+            "url": url,
+            "anchor_text": p.get("title") or "",
+            "source_page": "web_search",
+            "kind": "annual_report",
+            "fiscal_year": p.get("fiscal_year"),
+            "language": p.get("language"),
+            "title": p.get("title"),
+        })
+    return enriched
+
+
+def verify_pdf_url(url: str) -> bool:
+    """HEAD/GET-probe a URL to confirm it returns an actual PDF."""
+    try:
+        with httpx.Client() as c:
+            r = c.head(url, headers=HEADERS, follow_redirects=True, timeout=20)
+            if r.status_code >= 400 or "pdf" not in (r.headers.get("content-type") or "").lower():
+                # Fall back to a small ranged GET — many CDNs don't answer HEAD properly.
+                r = c.get(url, headers={**HEADERS, "Range": "bytes=0-1024"}, follow_redirects=True, timeout=20)
+                if r.status_code >= 400:
+                    return False
+                ctype = (r.headers.get("content-type") or "").lower()
+                if "pdf" not in ctype and not r.content.startswith(b"%PDF"):
+                    return False
+        return True
+    except Exception:
+        return False
 
 
 def annual_reports(classified: list[dict]) -> list[dict]:

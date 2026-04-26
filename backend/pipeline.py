@@ -24,14 +24,23 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
     candidates = pdf_finder.crawl_pdfs(info["ir_url"], info.get("reports_url"))
     emit("crawled", candidate_count=len(candidates))
 
-    emit("classifying", message=f"Classifying {len(candidates)} PDFs…")
-    classified = pdf_finder.classify_pdfs(
-        info["name"],
-        candidates,
-        on_progress=lambda stage, fields: emit(stage, **fields),
-    )
-    annuals = pdf_finder.annual_reports(classified)[:MAX_REPORTS]
-    emit("classified", annual_count=len(annuals), annuals=[{"year": a.get("fiscal_year"), "url": a["url"]} for a in annuals])
+    annuals: list[dict] = []
+    if candidates:
+        emit("classifying", message=f"Classifying {len(candidates)} PDFs…")
+        classified = pdf_finder.classify_pdfs(
+            info["name"],
+            candidates,
+            on_progress=lambda stage, fields: emit(stage, **fields),
+        )
+        annuals = pdf_finder.annual_reports(classified)[:MAX_REPORTS]
+        emit("classified", annual_count=len(annuals), annuals=[{"year": a.get("fiscal_year"), "url": a["url"]} for a in annuals])
+
+    if not annuals:
+        emit("web_fallback", message="Crawler found no annual reports — searching the web…")
+        web_hits = pdf_finder.web_search_annual_reports(info["name"], info.get("ir_url"), max_years=MAX_REPORTS)
+        verified = [h for h in web_hits if pdf_finder.verify_pdf_url(h["url"])]
+        annuals = pdf_finder.annual_reports(verified)[:MAX_REPORTS]
+        emit("web_fallback_done", found=len(web_hits), verified=len(verified), kept=len(annuals))
 
     if not annuals:
         emit("done", error="No annual reports found.", statements={})

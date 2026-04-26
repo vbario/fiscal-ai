@@ -351,6 +351,7 @@ function summarize(data) {
   if (copy.chunk != null && copy.attempt != null) return `chunk ${copy.chunk}/${copy.chunks}: retry ${copy.attempt} — ${copy.error || ""}`;
   if (copy.chunk != null && copy.count != null) return `chunk ${copy.chunk}/${copy.chunks}: fallback classified ${copy.count} PDFs${copy.error ? " — " + copy.error : ""}`;
   if (copy.chunk != null) return `chunk ${copy.chunk}/${copy.chunks}: ${copy.count || 0} PDFs`;
+  if (copy.found != null && copy.verified != null && copy.kept != null) return `web search: ${copy.found} candidates → ${copy.verified} verified → ${copy.kept} kept`;
   if (copy.year != null) return `year ${copy.year}${copy.error ? " — " + copy.error : ""}`;
   if (copy.message) return copy.message;
   if (copy.statements_summary) return Object.entries(copy.statements_summary).map(([k,v])=>`${k}:${v}`).join(", ");
