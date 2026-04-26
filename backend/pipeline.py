@@ -1,6 +1,7 @@
 """End-to-end pipeline for one company: company info → PDFs → extractions → merged statements."""
 from __future__ import annotations
 
+import datetime as dt
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
@@ -12,6 +13,56 @@ ProgressFn = Callable[[str, dict], None]
 MAX_REPORTS = 10  # 10 years of annual reports per company
 
 
+def _history_message(name: str, history: dict) -> str:
+    if not history["is_public"]:
+        return f"{name} is not publicly listed."
+    yrs = history.get("years_public")
+    ipo = history.get("ipo_year")
+    if ipo and yrs is not None:
+        plural = "s" if yrs != 1 else ""
+        if yrs >= MAX_REPORTS:
+            return f"{name} has been public since {ipo} ({yrs} year{plural}); fetching the last 10 years."
+        return (
+            f"{name} has been public since {ipo} ({yrs} year{plural}); fetching all available "
+            f"annual reports (up to {history['max_years']})."
+        )
+    return f"{name} is publicly listed; listing year unknown — fetching the last 10 years."
+
+
+def _public_history(info: dict) -> dict:
+    """Compute years-public window and a human-readable note."""
+    is_public = bool(info.get("is_public"))
+    ipo_year = info.get("ipo_year") if isinstance(info.get("ipo_year"), int) else None
+    today = dt.date.today()
+    years_public: int | None = None
+    note: str | None = None
+    if not is_public:
+        note = "Not currently a publicly listed company."
+        max_years = 0
+    elif ipo_year is None:
+        # Public but listing year unknown — fall back to the full 10-year window.
+        max_years = MAX_REPORTS
+        note = "Listing year not confirmed; defaulting to the last 10 years of reports."
+    else:
+        years_public = max(0, today.year - ipo_year)
+        if years_public >= MAX_REPORTS:
+            max_years = MAX_REPORTS
+        else:
+            max_years = max(1, years_public + 1)  # include partial current year
+            note = (
+                f"Public since {ipo_year} ({years_public} year"
+                f"{'s' if years_public != 1 else ''}); fewer than 10 years of annual reports available."
+            )
+    return {
+        "is_public": is_public,
+        "ipo_year": ipo_year,
+        "ipo_date": info.get("ipo_date"),
+        "years_public": years_public,
+        "max_years": max_years,
+        "public_status_note": info.get("public_status_note") or note,
+    }
+
+
 def run_company(name: str, on_progress: ProgressFn) -> dict:
     def emit(stage: str, **fields):
         on_progress(stage, {"company": name, **fields})
@@ -19,6 +70,16 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
     emit("resolving", message=f"Looking up {name}…")
     info = company_mod.resolve(name)
     emit("resolved", info=info)
+
+    history = _public_history(info)
+    info["public_history"] = history
+    emit("public_history", history=history, message=_history_message(info["name"], history))
+
+    if not history["is_public"]:
+        emit("done", error="Company is not publicly listed.", statements={})
+        return {"company": info, "statements": {}}
+
+    max_years = history["max_years"]
 
     emit("crawling", message="Finding PDFs on IR site…")
     candidates = pdf_finder.crawl_pdfs(info["ir_url"], info.get("reports_url"))
@@ -32,14 +93,14 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
             candidates,
             on_progress=lambda stage, fields: emit(stage, **fields),
         )
-        annuals = pdf_finder.annual_reports(classified)[:MAX_REPORTS]
+        annuals = pdf_finder.annual_reports(classified)[:max_years]
         emit("classified", annual_count=len(annuals), annuals=[{"year": a.get("fiscal_year"), "url": a["url"]} for a in annuals])
 
     if not annuals:
         emit("web_fallback", message="Crawler found no annual reports — searching the web…")
-        web_hits = pdf_finder.web_search_annual_reports(info["name"], info.get("ir_url"), max_years=MAX_REPORTS)
+        web_hits = pdf_finder.web_search_annual_reports(info["name"], info.get("ir_url"), max_years=max_years)
         verified = [h for h in web_hits if pdf_finder.verify_pdf_url(h["url"])]
-        annuals = pdf_finder.annual_reports(verified)[:MAX_REPORTS]
+        annuals = pdf_finder.annual_reports(verified)[:max_years]
         emit("web_fallback_done", found=len(web_hits), verified=len(verified), kept=len(annuals))
 
     if not annuals:

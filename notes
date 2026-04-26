@@ -1,3 +1,26 @@
+This is the report generator app.
+
+It will generate 10-year retrospective financial documents on demand for any public company:
+- income statement
+- balance sheet
+- cash flow statement.
+
+This is how the app works:
+
+1. Input a company name.
+2. Find the company and confirm it's a public company.
+3. Check how long the company has been public.
+4. For up to 10 years of the companys existence as a public company, based on the company's existence, find financial records with the information needed to generate the reports. 
+5. Parse PDFs/etc for data.
+6. Generate reports.
+
+There is an age/click gate checker for websites with a gate. Also, a fallback option exists that, when data can't be pulled from the website for some reason, will look for the documents directly. 
+
+
+-----
+
+
+
 ** Let's create an app that researches information about public European companies and compiles a report **
 
 I should be able to enter the name of a company, or multiple companies.
@@ -24,6 +47,9 @@ Notes:
 
 
 
-1. When in this state, show an indication that the app is still working (spinner/animation), and give more updates in the on-screen console along the way. This should give a sense of the app working.
+-> 1. When in this state, show an indication that the app is still working (spinner/animation), and give more updates in the on-screen console along the way. This should give a sense of the app working.
+
 2. When an API cost is incurred, show this update in the on-screen console.
 3. Make sure we're saving all of the data, so when the app restarts I can see it.
+4. Add an option to export the data for a given company as a PDF (for the income statement, balance sheet and cash flow statement).
+5. Add a light/day mode (selector in the top right corner).

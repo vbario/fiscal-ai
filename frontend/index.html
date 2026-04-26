@@ -345,6 +345,12 @@ function summarize(data) {
   const copy = {...data};
   delete copy.company;
   if (copy.info) return `${copy.info.name} (${copy.info.ticker}) — IR: ${copy.info.ir_url}`;
+  if (copy.history) {
+    const h = copy.history;
+    if (h.is_public === false) return "Not publicly listed";
+    if (h.ipo_year && h.years_public != null) return `Public since ${h.ipo_year} (${h.years_public} years) — fetching up to ${h.max_years}`;
+    return "Publicly listed; listing year unknown";
+  }
   if (copy.candidate_count != null) return `${copy.candidate_count} PDFs found`;
   if (copy.annual_count != null) return `${copy.annual_count} annual reports kept`;
   if (copy.chunk != null && copy.classified_count != null) return `chunk ${copy.chunk}/${copy.chunks}: ${copy.classified_count} PDFs classified`;
@@ -413,15 +419,31 @@ function renderResult() {
   const company = data.company || {};
   const stmts = data.statements || {};
 
+  const history = company.public_history || {};
+  let publicBits = "";
+  if (history.is_public === false) {
+    publicBits = `&middot; <span style="color:var(--warn)">Not publicly listed</span>`;
+  } else if (history.ipo_year && history.years_public != null) {
+    const plural = history.years_public === 1 ? "" : "s";
+    publicBits = `&middot; Public since <b>${history.ipo_year}</b> (${history.years_public} year${plural})`;
+  } else if (history.is_public) {
+    publicBits = `&middot; Publicly listed`;
+  }
+
   let html = `<div class="meta meta-actions">
     <span><b>${escapeHtml(company.name||name)}</b>
       &middot; ${escapeHtml(company.ticker||"")}
       &middot; ${escapeHtml(company.exchange||"")}
       &middot; ${escapeHtml(company.country||"")}
+      ${publicBits}
       &middot; <a href="${escapeAttr(company.ir_url||"#")}" target="_blank" rel="noopener" style="color:var(--accent)">IR site</a>
     </span>
     <button class="export" id="export-pdf" type="button">Export PDF</button>
   </div>`;
+
+  if (history.public_status_note && (history.is_public === false || (history.years_public != null && history.years_public < 10))) {
+    html += `<div class="note" style="margin: -6px 0 12px">${escapeHtml(history.public_status_note)}</div>`;
+  }
 
   html += `<div class="tabs" id="tabs-stmt">`;
   for (const k of Object.keys(STMT_LABELS)) {
