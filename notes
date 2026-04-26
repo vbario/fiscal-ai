@@ -17,3 +17,13 @@ Notes:
 
 - When creating the clean view, a lot of similarly named items will create a massive and cluttered table, so it’s best to deduplicate and order things to align with the company’s latest reporting
 - When extracting from the 2024 report for example, it often contains data for 2023 and 2022, which restate the 2023 and 2022 report data and is therefore more up to date and important. If you extract every column of data from every report, you can use the latest data for every period.
+
+
+
+-----
+
+
+
+1. When in this state, show an indication that the app is still working (spinner/animation), and give more updates in the on-screen console along the way. This should give a sense of the app working.
+2. When an API cost is incurred, show this update in the on-screen console.
+3. Make sure we're saving all of the data, so when the app restarts I can see it.

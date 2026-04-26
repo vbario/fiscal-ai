@@ -7,10 +7,10 @@ from typing import Any, Optional
 
 from openai import OpenAI
 
-from . import cache
+from . import cache, cost
 from .config import MODEL, OPENAI_API_KEY, VISION_MODEL
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=180.0, max_retries=2)
 
 
 def web_search_json(prompt: str, schema: dict, cache_key: Optional[str] = None) -> dict:
@@ -20,8 +20,9 @@ def web_search_json(prompt: str, schema: dict, cache_key: Optional[str] = None) 
         if cached is not None:
             return cached
 
+    _model = MODEL
     resp = client.responses.create(
-        model=MODEL,
+        model=_model,
         tools=[{"type": "web_search"}],
         input=[
             {
@@ -39,6 +40,7 @@ def web_search_json(prompt: str, schema: dict, cache_key: Optional[str] = None) 
             },
         ],
     )
+    cost.record(_model, getattr(resp, "usage", None))
     text = resp.output_text.strip()
     data = _parse_json(text)
     if cache_key:
@@ -73,6 +75,7 @@ def vision_json(
         model=VISION_MODEL,
         input=[{"role": "user", "content": content}],
     )
+    cost.record(VISION_MODEL, getattr(resp, "usage", None))
     text = resp.output_text.strip()
     data = _parse_json(text)
     if cache_key:
@@ -97,6 +100,7 @@ def text_json(prompt: str, schema: dict, cache_key: Optional[str] = None) -> dic
             },
         ],
     )
+    cost.record(MODEL, getattr(resp, "usage", None))
     data = _parse_json(resp.output_text.strip())
     if cache_key:
         cache.put(cache_key, data)

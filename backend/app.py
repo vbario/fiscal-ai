@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from . import pipeline
+from . import cost, pipeline
 
 app = FastAPI(title="Fiscal AI")
 
@@ -117,6 +117,17 @@ async def get_report(job_id: str):
     if not job:
         raise HTTPException(404, "job not found")
     return JSONResponse({"job_id": job.id, "done": job.done, "results": job.results})
+
+
+@app.get("/api/cost")
+async def get_cost():
+    return JSONResponse(cost.snapshot())
+
+
+@app.post("/api/cost/reset")
+async def reset_cost():
+    cost.reset()
+    return JSONResponse(cost.snapshot())
 
 
 @app.get("/")

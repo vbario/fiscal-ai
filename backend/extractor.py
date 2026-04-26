@@ -53,6 +53,40 @@ PAGES_PER_STATEMENT = 3
 RENDER_DPI = 180
 
 
+def _statement_page_score(statement_type: str, text_norm: str) -> int:
+    """Prefer primary statement pages over TOCs and note references."""
+    head = text_norm[:700]
+    score = 0
+    if statement_type == "income_statement":
+        if re.search(r"consolidated\s+statement\s+of\s+comprehensive\s+income", head, re.I):
+            score += 80
+        if re.search(r"consolidated\s+(income\s+statement|statement\s+of\s+(profit\s+or\s+loss|operations))", head, re.I):
+            score += 80
+        if re.search(r"for\s+the\s+years?\s+ended|net\s+income|income\s+before", head, re.I):
+            score += 25
+    elif statement_type == "balance_sheet":
+        if re.search(r"consolidated\s+(balance\s+sheet|statement\s+of\s+financial\s+position)", head, re.I):
+            score += 90
+        if re.search(r"as\s+at|as\s+of|total\s+assets|total\s+liabilities", head, re.I):
+            score += 25
+    elif statement_type == "cash_flow":
+        if re.search(r"consolidated\s+(statement\s+of\s+cash\s+flows|cash\s+flow\s+statement)", head, re.I):
+            score += 90
+        if re.search(r"for\s+the\s+years?\s+ended|operating\s+activities|investing\s+activities|financing\s+activities", head, re.I):
+            score += 25
+
+    if re.search(r"all\s+amounts\s+(are\s+)?in|unless\s+otherwise\s+stated", head, re.I):
+        score += 10
+    if re.search(r"table\s+of\s+contents|contents", head, re.I):
+        score -= 100
+    # TOC pages often mention several primary statements and many note titles.
+    statement_mentions = len(re.findall(r"Consolidated\s+Statement|Consolidated\s+Balance\s+Sheet|Company\s+Balance\s+Sheet", text_norm, re.I))
+    note_mentions = len(re.findall(r"\b\d{1,2}\.\s+[A-Z]", text_norm))
+    if statement_mentions >= 3 or note_mentions >= 6:
+        score -= 70
+    return score
+
+
 def _file_id(path: Path) -> str:
     h = hashlib.sha256()
     h.update(path.read_bytes())
@@ -83,15 +117,24 @@ def find_statement_pages(pdf_path: Path) -> dict[str, list[int]]:
                     if re.search(r"table of contents|contents", text_norm[:300], re.I):
                         continue
                     hits[stmt].append(i)
-    # Heuristic: keep the FIRST cluster of hits per statement (the actual primary
-    # statement near the front of the financial-statements section, not later notes).
+    # Heuristic: keep the best-scoring primary statement page, avoiding TOCs and
+    # later note references that mention statement names.
     cleaned: dict[str, list[int]] = {}
     for stmt, pages in hits.items():
         if not pages:
             cleaned[stmt] = []
             continue
-        pages.sort()
-        anchor = pages[0]
+        scored: list[tuple[int, int]] = []
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page_idx in pages:
+                try:
+                    text = pdf.pages[page_idx].extract_text() or ""
+                except Exception:
+                    text = ""
+                text_norm = re.sub(r"\s+", " ", text)
+                scored.append((_statement_page_score(stmt, text_norm), page_idx))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        anchor = scored[0][1]
         cleaned[stmt] = sorted(set(range(anchor, min(anchor + PAGES_PER_STATEMENT, anchor + 8))))
     return cleaned
 

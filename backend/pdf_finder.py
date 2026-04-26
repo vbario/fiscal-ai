@@ -1,11 +1,11 @@
 """Discover annual-report PDFs on a company's IR site, then classify them with the LLM."""
 from __future__ import annotations
 
+import html
 import hashlib
 import re
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -22,14 +22,79 @@ MAX_PAGES = 12
 MAX_CANDIDATES = 60
 
 
+def _host(url: str) -> str:
+    return urlparse(url).netloc.split(":")[0].lower().removeprefix("www.")
+
+
+def _site_root(host: str) -> str:
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
 def _same_site(a: str, b: str) -> bool:
-    return urlparse(a).netloc.split(":")[0].lower().endswith(
-        urlparse(b).netloc.split(":")[0].lower().split("www.")[-1]
+    """Allow IR pages to link across sibling corporate subdomains."""
+    ha, hb = _host(a), _host(b)
+    return ha == hb or ha.endswith("." + hb) or hb.endswith("." + ha) or _site_root(ha) == _site_root(hb)
+
+
+def _is_document_link(href: str) -> bool:
+    low = href.lower()
+    return (
+        ".pdf" in low
+        or "/download" in low
+        or "/dam/" in low
+        or "/asset/" in low
     )
 
 
-def _is_pdf_link(href: str) -> bool:
-    return ".pdf" in href.lower()
+def _context_text(raw_html: str, start: int, end: int, radius: int = 450) -> str:
+    snippet = raw_html[max(0, start - radius) : min(len(raw_html), end + radius)]
+    snippet = re.sub(r"<[^>]+>", " ", snippet)
+    snippet = html.unescape(unquote(snippet))
+    snippet = re.sub(r"\s+", " ", snippet).strip()
+    return snippet[:500]
+
+
+def _add_pdf_candidate(seen_pdfs: dict[str, dict], href: str, text: str, source_page: str) -> None:
+    if href not in seen_pdfs:
+        seen_pdfs[href] = {
+            "url": href,
+            "anchor_text": text[:500],
+            "source_page": source_page,
+        }
+
+
+def _page_context(soup: BeautifulSoup, url: str) -> str:
+    parts: list[str] = []
+    if soup.title and soup.title.string:
+        parts.append(soup.title.string.strip())
+    h1 = soup.find("h1")
+    if h1:
+        parts.append(" ".join(h1.get_text(" ", strip=True).split()))
+    parts.append(url)
+    return " | ".join(p for p in parts if p)
+
+
+def _prioritize_page(url: str) -> bool:
+    path = urlparse(url).path.lower().rstrip("/")
+    return bool(re.search(r"/financials/\d{4}$", path) or re.search(r"/reports?/\d{4}$", path))
+
+
+def _candidate_score(c: dict) -> tuple[int, str]:
+    text = (c.get("anchor_text") or "") + " " + c.get("url", "") + " " + c.get("source_page", "")
+    low = text.lower()
+    score = 0
+    if "annual report" in low or "annual-report" in low:
+        score += 100
+    if re.search(r"/financials/\d{4}\b", low) or re.search(r"/reports?/\d{4}\b", low):
+        score += 50
+    if "consolidated financial statements" in low:
+        score += 30
+    if "ixbrl" in low or "pillar 3" in low or "transparency and disclosure" in low:
+        score -= 80
+    if re.search(r"\bh[12]\b|half[- ]year|interim|business update|press release", low):
+        score -= 20
+    return (-score, c.get("url", ""))
 
 
 def _fetch(client: httpx.Client, url: str) -> httpx.Response | None:
@@ -53,7 +118,7 @@ def crawl_pdfs(ir_url: str, reports_url: str | None = None) -> list[dict]:
     queue: list[str] = list(dict.fromkeys(seeds))
 
     keywords = re.compile(
-        r"(annual|integrated|results|reports?|investors?|financ|interim|half-year|q[1-4])",
+        r"(annual|integrated|results|reports?|financ|interim|half-year|q[1-4])",
         re.I,
     )
 
@@ -67,21 +132,42 @@ def crawl_pdfs(ir_url: str, reports_url: str | None = None) -> list[dict]:
             if not r or "html" not in r.headers.get("content-type", ""):
                 continue
             soup = BeautifulSoup(r.text, "html.parser")
+            page_context = _page_context(soup, url)
             for a in soup.find_all("a", href=True):
                 href = urljoin(url, a["href"])
                 text = " ".join(a.get_text(" ", strip=True).split())[:200]
-                if _is_pdf_link(href):
-                    if href not in seen_pdfs:
-                        seen_pdfs[href] = {
-                            "url": href,
-                            "anchor_text": text,
-                            "source_page": url,
-                        }
+                text_with_context = f"{text} | {page_context}" if page_context else text
+                if _is_document_link(href):
+                    _add_pdf_candidate(seen_pdfs, href, text_with_context, url)
                 elif _same_site(href, seeds[0]) and keywords.search(href + " " + text):
-                    if href not in seen_pages and len(seen_pages) + len(queue) < MAX_PAGES * 2:
-                        queue.append(href)
+                    if href not in seen_pages and (
+                        _prioritize_page(href) or len(seen_pages) + len(queue) < MAX_PAGES * 2
+                    ):
+                        if _prioritize_page(href):
+                            queue.insert(0, href)
+                        else:
+                            queue.append(href)
 
-    return list(seen_pdfs.values())[:MAX_CANDIDATES]
+            # Many modern IR sites render reports from JSON/Nuxt payloads instead
+            # of plain anchors. Pull out absolute URLs and keep nearby payload text
+            # so classification can infer the year/type from surrounding labels.
+            for m in re.finditer(r"https?://[^\"'<>\\\s]+", r.text):
+                href = html.unescape(m.group(0)).rstrip(").,;")
+                if not _same_site(href, seeds[0]):
+                    continue
+                context = _context_text(r.text, m.start(), m.end())
+                if _is_document_link(href):
+                    _add_pdf_candidate(seen_pdfs, href, f"{context} | {page_context}", url)
+                elif keywords.search(href + " " + context):
+                    if href not in seen_pages and (
+                        _prioritize_page(href) or len(seen_pages) + len(queue) < MAX_PAGES * 2
+                    ):
+                        if _prioritize_page(href):
+                            queue.insert(0, href)
+                        else:
+                            queue.append(href)
+
+    return sorted(seen_pdfs.values(), key=_candidate_score)[:MAX_CANDIDATES]
 
 
 CLASSIFY_SCHEMA = {
@@ -138,7 +224,8 @@ def classify_pdfs(company_name: str, candidates: list[dict]) -> list[dict]:
         "(annual_report, interim_report, results_presentation, press_release, sustainability, "
         "governance, other) and the fiscal year. "
         "Annual reports include 'Annual Report', 'Integrated Annual Report', 'Annual Review' "
-        "(but NOT sustainability reports or interim reports). "
+        "'Universal Registration Document', full-year results, and H2/full-year shareholder letters "
+        "when they contain the annual financial statements (but NOT sustainability reports). "
         "Half-year and quarterly results are interim_report. "
         "If the year cannot be inferred from the URL/text, set fiscal_year to null."
         f"\n\nCandidates:\n{listing}"

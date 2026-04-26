@@ -31,6 +31,31 @@
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
   header .sub { color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  .cost {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    color: var(--muted); white-space: nowrap;
+    position: relative;
+  }
+  .cost .amount { color: var(--good); font-weight: 600; font-size: 13px; }
+  .cost .label { color: var(--muted); }
+  .cost .reset {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 11px;
+  }
+  .cost .reset:hover { color: var(--text); border-color: var(--accent); }
+  .cost .details {
+    position: absolute; top: calc(100% + 6px); right: 0;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; min-width: 240px;
+    display: none; z-index: 10; color: var(--muted);
+  }
+  .cost:hover .details { display: block; }
+  .cost .details .row { display: flex; justify-content: space-between; padding: 2px 0; }
+  .cost .details .row b { color: var(--text); font-weight: 500; }
   main { padding: 20px 24px 60px; max-width: 1500px; margin: 0 auto; }
 
   .controls { display: flex; gap: 10px; margin-bottom: 18px; }
@@ -98,6 +123,14 @@
 <header>
   <h1>Fiscal AI</h1>
   <span class="sub">Public-company financial statements, extracted from primary sources</span>
+  <div class="spacer"></div>
+  <div class="cost" id="cost" title="Estimated OpenAI spend this session">
+    <span class="label">spend</span>
+    <span class="amount" id="cost-amount">$0.0000</span>
+    <span class="label" id="cost-tokens">0 in / 0 out</span>
+    <button class="reset" id="cost-reset" type="button">reset</button>
+    <div class="details" id="cost-details"></div>
+  </div>
 </header>
 <main>
   <div class="controls">
@@ -302,6 +335,56 @@ function renderStatement(s) {
 
 function escapeHtml(s){ return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function escapeAttr(s){ return escapeHtml(s); }
+
+function fmtTokens(n) {
+  n = Number(n) || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+}
+function fmtUsd(n) {
+  n = Number(n) || 0;
+  if (n >= 1)  return "$" + n.toFixed(2);
+  return "$" + n.toFixed(4);
+}
+
+async function refreshCost() {
+  try {
+    const r = await fetch("/api/cost");
+    if (!r.ok) return;
+    const j = await r.json();
+    $("#cost-amount").textContent = fmtUsd(j.usd);
+    $("#cost-tokens").textContent =
+      `${fmtTokens(j.input_tokens)} in / ${fmtTokens(j.output_tokens)} out`;
+    const det = $("#cost-details");
+    const rows = [
+      ["Calls",            j.calls],
+      ["Input tokens",     j.input_tokens.toLocaleString()],
+      ["  cached",         (j.cached_input_tokens||0).toLocaleString()],
+      ["Output tokens",    j.output_tokens.toLocaleString()],
+      ["  reasoning",      (j.reasoning_tokens||0).toLocaleString()],
+      ["Estimated cost",   fmtUsd(j.usd)],
+    ];
+    let html = rows.map(([k,v]) => `<div class="row"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`).join("");
+    const models = Object.keys(j.by_model || {});
+    if (models.length) {
+      html += `<div class="row" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px"><span>By model</span><b></b></div>`;
+      for (const m of models) {
+        const mm = j.by_model[m];
+        html += `<div class="row"><span>${escapeHtml(m)}</span><b>${fmtUsd(mm.usd)} · ${fmtTokens(mm.input_tokens)}/${fmtTokens(mm.output_tokens)}</b></div>`;
+      }
+    }
+    det.innerHTML = html;
+  } catch (_) {}
+}
+
+$("#cost-reset").addEventListener("click", async () => {
+  await fetch("/api/cost/reset", {method: "POST"});
+  refreshCost();
+});
+
+refreshCost();
+setInterval(refreshCost, 2000);
 </script>
 </body>
 </html>
