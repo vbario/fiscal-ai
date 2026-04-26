@@ -96,12 +96,26 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
         annuals = pdf_finder.annual_reports(classified)[:max_years]
         emit("classified", annual_count=len(annuals), annuals=[{"year": a.get("fiscal_year"), "url": a["url"]} for a in annuals])
 
-    if not annuals:
-        emit("web_fallback", message="Crawler found no annual reports — searching the web…")
+    today_year = dt.date.today().year
+    expected_years = set()
+    if max_years:
+        # Most recent fiscal year is usually last year; current year only if a report has been filed.
+        latest_filed = max((a.get("fiscal_year") for a in annuals if isinstance(a.get("fiscal_year"), int)), default=today_year - 1)
+        latest_year = max(latest_filed, today_year - 1)
+        expected_years = {latest_year - i for i in range(max_years)}
+    have_years = {a.get("fiscal_year") for a in annuals if isinstance(a.get("fiscal_year"), int)}
+    missing_years = sorted(expected_years - have_years, reverse=True)
+
+    if missing_years:
+        reason = "no annual reports" if not annuals else f"missing {len(missing_years)} year(s): {missing_years}"
+        emit("web_fallback", message=f"Crawler {reason} — searching the web…")
         web_hits = pdf_finder.web_search_annual_reports(info["name"], info.get("ir_url"), max_years=max_years)
-        verified = [h for h in web_hits if pdf_finder.verify_pdf_url(h["url"])]
-        annuals = pdf_finder.annual_reports(verified)[:max_years]
-        emit("web_fallback_done", found=len(web_hits), verified=len(verified), kept=len(annuals))
+        new_hits = [h for h in web_hits if h.get("fiscal_year") in missing_years]
+        verified = [h for h in new_hits if pdf_finder.verify_pdf_url(h["url"])]
+        merged = pdf_finder.annual_reports(annuals + verified)[:max_years]
+        added = len(merged) - len(annuals)
+        annuals = merged
+        emit("web_fallback_done", found=len(web_hits), verified=len(verified), added=added, total=len(annuals))
 
     if not annuals:
         emit("done", error="No annual reports found.", statements={})
