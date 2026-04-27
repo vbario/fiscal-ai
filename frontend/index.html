@@ -77,12 +77,34 @@
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: 8px; padding: 6px 8px; font-size: 12px;
   }
-  .theme-toggle {
+  .theme-toggle, .settings-toggle {
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer;
     display: inline-flex; align-items: center; gap: 6px;
   }
-  .theme-toggle:hover { border-color: var(--accent); }
+  .theme-toggle:hover, .settings-toggle:hover { border-color: var(--accent); }
+  .settings-panel {
+    display: none; position: absolute; right: 24px; top: 60px; z-index: 20;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; min-width: 360px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+  }
+  .settings-panel.open { display: block; }
+  .settings-panel h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+  .settings-panel label { display: block; font-size: 11px; color: var(--muted); margin: 10px 0 4px; }
+  .settings-panel input, .settings-panel select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 12px;
+  }
+  .settings-panel .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .settings-panel .actions button {
+    background: var(--accent); color: var(--button-text); border: none;
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 600;
+  }
+  .settings-panel .actions button.ghost {
+    background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 400;
+  }
+  .settings-panel .help { color: var(--muted); font-size: 11px; margin-top: 4px; }
   main { padding: 20px 24px 60px; max-width: 1500px; margin: 0 auto; }
 
   .controls { display: flex; gap: 10px; margin-bottom: 18px; }
@@ -169,7 +191,21 @@
   <h1>Fiscal AI</h1>
   <span class="sub">Public-company financial statements, extracted from primary sources</span>
   <div class="spacer"></div>
+  <button class="settings-toggle" id="settings-btn" type="button" aria-label="Settings">⚙ Settings</button>
   <button class="theme-toggle" id="theme" type="button" aria-label="Toggle theme"></button>
+  <div class="settings-panel" id="settings-panel">
+    <h3>Settings</h3>
+    <label for="setting-key">OpenAI API Key (optional)</label>
+    <input id="setting-key" type="password" autocomplete="off" placeholder="sk-… (leave blank to use server default)" />
+    <div class="help">Stored in your browser only. Sent with each report request; never persisted server-side.</div>
+    <label for="setting-model">Model</label>
+    <select id="setting-model"></select>
+    <div class="help">Used for resolution, classification, extraction, and merging.</div>
+    <div class="actions">
+      <button class="ghost" id="settings-clear" type="button">Clear key</button>
+      <button id="settings-save" type="button">Save</button>
+    </div>
+  </div>
   <div class="cost" id="cost" title="Estimated OpenAI spend this session">
     <span class="label">spend</span>
     <span class="amount" id="cost-amount">$0.0000</span>
@@ -232,6 +268,65 @@ function setTheme(theme) {
 
 setTheme(localStorage.getItem("fiscal-theme") || "dark");
 
+const settings = {
+  apiKey: localStorage.getItem("fiscal-api-key") || "",
+  model: localStorage.getItem("fiscal-model") || "",
+  models: [],
+  defaultModel: "",
+};
+
+async function initSettings() {
+  try {
+    const r = await fetch("/api/models");
+    const j = await r.json();
+    settings.models = j.models || [];
+    settings.defaultModel = j.default || (settings.models[0] && settings.models[0].id) || "";
+  } catch (_e) {
+    settings.models = [];
+  }
+  const sel = $("#setting-model");
+  sel.innerHTML = "";
+  for (const m of settings.models) {
+    const opt = document.createElement("option");
+    opt.value = m.id; opt.textContent = m.label;
+    sel.appendChild(opt);
+  }
+  sel.value = settings.model || settings.defaultModel;
+  $("#setting-key").value = settings.apiKey;
+}
+
+function reqOverrides() {
+  const out = {};
+  if (settings.apiKey) out.api_key = settings.apiKey;
+  if (settings.model && settings.model !== settings.defaultModel) out.model = settings.model;
+  return out;
+}
+
+$("#settings-btn").addEventListener("click", () => {
+  $("#settings-panel").classList.toggle("open");
+});
+document.addEventListener("click", (e) => {
+  const panel = $("#settings-panel"), btn = $("#settings-btn");
+  if (!panel.classList.contains("open")) return;
+  if (panel.contains(e.target) || btn.contains(e.target)) return;
+  panel.classList.remove("open");
+});
+$("#settings-save").addEventListener("click", () => {
+  settings.apiKey = $("#setting-key").value.trim();
+  settings.model = $("#setting-model").value;
+  if (settings.apiKey) localStorage.setItem("fiscal-api-key", settings.apiKey);
+  else localStorage.removeItem("fiscal-api-key");
+  localStorage.setItem("fiscal-model", settings.model);
+  $("#settings-panel").classList.remove("open");
+});
+$("#settings-clear").addEventListener("click", () => {
+  settings.apiKey = "";
+  $("#setting-key").value = "";
+  localStorage.removeItem("fiscal-api-key");
+});
+
+initSettings();
+
 async function run() {
   const raw = $("#companies").value.trim();
   if (!raw) return;
@@ -251,7 +346,7 @@ async function run() {
   const r = await fetch("/api/reports", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({companies}),
+    body: JSON.stringify({companies, ...reqOverrides()}),
   });
   const j = await r.json();
   state.jobId = j.job_id;
@@ -481,7 +576,11 @@ async function retryActiveCompany() {
   updateStatus(`${company}: retrying report…`);
 
   try {
-    const r = await fetch(`/api/reports/${encodeURIComponent(state.jobId)}/companies/${encodeURIComponent(company)}/retry`, {method: "POST"});
+    const r = await fetch(`/api/reports/${encodeURIComponent(state.jobId)}/companies/${encodeURIComponent(company)}/retry`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(reqOverrides()),
+    });
     if (!r.ok) {
       const msg = await r.text();
       throw new Error(msg || `Retry failed with ${r.status}`);

@@ -1,11 +1,10 @@
-This is the report generator app.
+** This app will generate 10-year retrospective financial documents on demand for any public company **
 
-It will generate 10-year retrospective financial documents on demand for any public company:
 - income statement
 - balance sheet
 - cash flow statement.
 
-This is how the app works:
+** How the app works **
 
 1. Input a company name.
 2. Find the company and confirm it's a public company.
@@ -14,42 +13,14 @@ This is how the app works:
 5. Parse PDFs/etc for data.
 6. Generate reports.
 
-There is an age/click gate checker for websites with a gate. Also, a fallback option exists that, when data can't be pulled from the website for some reason, will look for the documents directly. 
+** Assumption **
 
+A company that has been public for up to the last 10 years will have those years' financial data readily available online.
 
------
+** Features **
 
-
-
-** Let's create an app that researches information about public European companies and compiles a report **
-
-I should be able to enter the name of a company, or multiple companies.
-
-First, find basic company info (e.g., name, ticker, investor relations website).
-
-Then, for each company:
-
-1. Scrape/classify the PDFs on the company’s investor relations website
-2. Parse the company’s Annual reports for the big three statements (Income Statement, Balance Sheet, & Cash Flow Statement) with the aim to extract all data exactly as the company reports it
-3. Compile the data from multiple reports into one clean view for 10 years of data for every statement
-
-Output:
-The output here is a table for every statement with 10 years of data, e.g., Tesla’s Income Statement
-
-Notes:
-
-- When creating the clean view, a lot of similarly named items will create a massive and cluttered table, so it’s best to deduplicate and order things to align with the company’s latest reporting
-- When extracting from the 2024 report for example, it often contains data for 2023 and 2022, which restate the 2023 and 2022 report data and is therefore more up to date and important. If you extract every column of data from every report, you can use the latest data for every period.
-
-
-
------
-
-
-
--> 1. When in this state, show an indication that the app is still working (spinner/animation), and give more updates in the on-screen console along the way. This should give a sense of the app working.
-
-2. When an API cost is incurred, show this update in the on-screen console.
-3. Make sure we're saving all of the data, so when the app restarts I can see it.
-4. Add an option to export the data for a given company as a PDF (for the income statement, balance sheet and cash flow statement).
-5. Add a light/day mode (selector in the top right corner).
+- age/click gate checker for websites with a gate
+- fallback option exists that, when data can't be pulled from the website for some reason, will look for the documents directly
+- reports can be downloaded as PDF
+- all reports and raw data are stored
+- state saved; persists on browser and server restart

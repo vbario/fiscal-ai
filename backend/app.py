@@ -9,7 +9,7 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import unquote
 
 import fitz
@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from . import cost, pipeline
+from . import config, cost, llm, pipeline
 
 app = FastAPI(title="Fiscal AI")
 
@@ -31,6 +31,13 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 class ReportRequest(BaseModel):
     companies: list[str]
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+
+
+class RetryRequest(BaseModel):
+    api_key: Optional[str] = None
+    model: Optional[str] = None
 
 
 # In-memory job registry. Each job has: companies, queues for SSE, results.
@@ -48,6 +55,9 @@ class Job:
         self.running_companies: set[str] = set()
         self.lock = threading.Lock()
         self.loop: asyncio.AbstractEventLoop | None = None
+        # User-supplied overrides (held in memory only — never persisted).
+        self.api_key: str | None = None
+        self.model: str | None = None
 
     def emit(self, event: dict[str, Any]):
         self.updated_at = datetime.now(timezone.utc).isoformat()
@@ -143,6 +153,7 @@ def _make_progress(job: Job, company: str):
 
 def _run_company_once(job: Job, name: str) -> None:
     try:
+        llm.set_overrides(api_key=job.api_key, model=job.model)
         result = pipeline.run_company(name, _make_progress(job, name))
         job.results[name] = result
         save_job(job)
@@ -190,11 +201,27 @@ def _run_retry(job: Job, name: str) -> None:
         cost.unsubscribe(listener)
 
 
+def _normalize_overrides(api_key: str | None, model: str | None) -> tuple[str | None, str | None]:
+    key = (api_key or "").strip() or None
+    mdl = (model or "").strip() or None
+    if mdl is not None and mdl not in config.ALLOWED_MODEL_IDS:
+        raise HTTPException(400, f"model must be one of: {sorted(config.ALLOWED_MODEL_IDS)}")
+    return key, mdl
+
+
+@app.get("/api/models")
+async def list_models():
+    return JSONResponse({"models": config.ALLOWED_MODELS, "default": config.MODEL})
+
+
 @app.post("/api/reports")
 async def create_report(req: ReportRequest):
     if not req.companies:
         raise HTTPException(400, "companies must be a non-empty list")
+    api_key, model = _normalize_overrides(req.api_key, req.model)
     job = Job([c.strip() for c in req.companies if c.strip()])
+    job.api_key = api_key
+    job.model = model
     job.loop = asyncio.get_running_loop()
     JOBS[job.id] = job
     save_job(job)
@@ -203,7 +230,7 @@ async def create_report(req: ReportRequest):
 
 
 @app.post("/api/reports/{job_id}/companies/{company_name}/retry")
-async def retry_company(job_id: str, company_name: str):
+async def retry_company(job_id: str, company_name: str, body: Optional[RetryRequest] = None):
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "job not found")
@@ -213,6 +240,10 @@ async def retry_company(job_id: str, company_name: str):
     if not job.done:
         raise HTTPException(409, "report is still running")
 
+    api_key, model = _normalize_overrides(
+        body.api_key if body else None, body.model if body else None
+    )
+
     with job.lock:
         if decoded in job.running_companies:
             raise HTTPException(409, "company retry is already running")
@@ -221,6 +252,11 @@ async def retry_company(job_id: str, company_name: str):
         job.done = False
         job.results.pop(decoded, None)
         job.loop = asyncio.get_running_loop()
+        # Refresh overrides if the caller supplied them; otherwise keep prior.
+        if api_key is not None:
+            job.api_key = api_key
+        if model is not None:
+            job.model = model
 
     save_job(job)
     job.emit({"type": "retry_started", "company": decoded})

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
+import threading
 from typing import Any, Optional
 
 from openai import OpenAI
@@ -10,7 +12,55 @@ from openai import OpenAI
 from . import cache, cost
 from .config import MODEL, OPENAI_API_KEY, VISION_MODEL
 
-client = OpenAI(api_key=OPENAI_API_KEY, timeout=300.0, max_retries=2)
+# Per-context overrides set by the API layer when the user supplies their own
+# key / preferred model in the UI. Falls back to env defaults when unset.
+_api_key_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "fiscal_ai_api_key", default=None
+)
+_model_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "fiscal_ai_model", default=None
+)
+
+_client_cache: dict[str, OpenAI] = {}
+_client_lock = threading.Lock()
+
+
+def set_overrides(api_key: Optional[str] = None, model: Optional[str] = None) -> None:
+    """Bind API key / model for the current contextvars context."""
+    if api_key is not None:
+        _api_key_var.set(api_key.strip() or None)
+    if model is not None:
+        _model_var.set(model.strip() or None)
+
+
+def _resolved_api_key() -> str:
+    key = _api_key_var.get() or OPENAI_API_KEY
+    if not key:
+        raise RuntimeError(
+            "No OpenAI API key configured. Set OPENAI_API_KEY in .env or "
+            "provide one in the app's Settings panel."
+        )
+    return key
+
+
+def _resolved_model() -> str:
+    return _model_var.get() or MODEL
+
+
+def _resolved_vision_model() -> str:
+    # When the user picks a model in the UI we use it for vision too — the
+    # current set of allowed models all support vision.
+    return _model_var.get() or VISION_MODEL
+
+
+def _client() -> OpenAI:
+    key = _resolved_api_key()
+    with _client_lock:
+        c = _client_cache.get(key)
+        if c is None:
+            c = OpenAI(api_key=key, timeout=300.0, max_retries=2)
+            _client_cache[key] = c
+        return c
 
 
 def web_search_json(prompt: str, schema: dict, cache_key: Optional[str] = None) -> dict:
@@ -20,8 +70,8 @@ def web_search_json(prompt: str, schema: dict, cache_key: Optional[str] = None) 
         if cached is not None:
             return cached
 
-    _model = MODEL
-    resp = client.responses.create(
+    _model = _resolved_model()
+    resp = _client().responses.create(
         model=_model,
         tools=[{"type": "web_search"}],
         input=[
@@ -71,11 +121,12 @@ def vision_json(
             }
         )
 
-    resp = client.responses.create(
-        model=VISION_MODEL,
+    _model = _resolved_vision_model()
+    resp = _client().responses.create(
+        model=_model,
         input=[{"role": "user", "content": content}],
     )
-    cost.record(VISION_MODEL, getattr(resp, "usage", None))
+    cost.record(_model, getattr(resp, "usage", None))
     text = resp.output_text.strip()
     data = _parse_json(text)
     if cache_key:
@@ -90,8 +141,9 @@ def text_json(prompt: str, schema: dict, cache_key: Optional[str] = None) -> dic
         if cached is not None:
             return cached
 
-    resp = client.responses.create(
-        model=MODEL,
+    _model = _resolved_model()
+    resp = _client().responses.create(
+        model=_model,
         input=[
             {"role": "system", "content": "Return ONLY a JSON object matching the requested schema."},
             {
@@ -100,7 +152,7 @@ def text_json(prompt: str, schema: dict, cache_key: Optional[str] = None) -> dic
             },
         ],
     )
-    cost.record(MODEL, getattr(resp, "usage", None))
+    cost.record(_model, getattr(resp, "usage", None))
     data = _parse_json(resp.output_text.strip())
     if cache_key:
         cache.put(cache_key, data)

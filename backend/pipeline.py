@@ -1,6 +1,7 @@
 """End-to-end pipeline for one company: company info → PDFs → extractions → merged statements."""
 from __future__ import annotations
 
+import contextvars
 import datetime as dt
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -137,8 +138,9 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
         emit("extracted", year=year, found=found)
         return year, ext
 
+    ctx = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_process, a): a for a in annuals}
+        futures = {pool.submit(ctx.run, _process, a): a for a in annuals}
         for fut in as_completed(futures):
             a = futures[fut]
             try:

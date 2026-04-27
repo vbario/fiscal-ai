@@ -110,7 +110,7 @@ Re-running the same company is essentially free after the first pass.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-echo "OPENAI_API_KEY=sk-..." > .env
+cp .env.example .env                  # then edit .env to add your key (or skip and use the UI)
 .venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8010
 ```
 
@@ -118,8 +118,24 @@ Then open <http://127.0.0.1:8010>.
 
 Optional env vars:
 
+- `OPENAI_API_KEY` — server-default key (omit to require users to bring their own via the Settings panel)
 - `OPENAI_MODEL` (default `gpt-5`) — used for resolution, classification, merging
 - `OPENAI_VISION_MODEL` (default = `OPENAI_MODEL`) — used for statement extraction
+
+### Bring-your-own key + model selection
+
+Click the ⚙ Settings button (top-right) to:
+
+- **Override the API key** — paste your own `sk-…` key. Stored in `localStorage` only; sent with each report request and never persisted server-side. Click "Clear key" to fall back to the server's `OPENAI_API_KEY`.
+- **Pick the model** — choose from the whitelist exposed by `GET /api/models`:
+  - `gpt-5` (default / recommended)
+  - `gpt-5-mini`, `gpt-5-nano` — faster / cheaper
+  - `gpt-4.1`, `gpt-4.1-mini`
+  - `gpt-4o`, `gpt-4o-mini`
+
+  The selection applies to all LLM stages (resolution, classification, vision extraction, merging, web-search fallback).
+
+How it's wired: the API key and model travel in the JSON body of `POST /api/reports` and the per-company retry endpoint. Inside the worker thread the values are bound to `contextvars` (`set_overrides()` in `backend/llm.py`) which propagate through `ThreadPoolExecutor` via `contextvars.copy_context()`. A small per-key `OpenAI` client cache keeps connection reuse efficient.
 
 ## Repo layout
 
