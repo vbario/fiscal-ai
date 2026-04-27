@@ -29,6 +29,23 @@ CLASSIFY_RETRIES = 0
 
 ProgressFn = Callable[[str, dict], None]
 
+PARTIAL_REPORT_RE = re.compile(
+    r"financial[- ]performance[- ]section|strategic[- ]report[- ]section|"
+    r"corporate[- ]governance[- ]section|remuneration|tcfd|climate|"
+    r"country[- ]by[- ]country|tax[- ]report|sustainability|esg|"
+    r"quarterly|q[1-4]|interim|press[- ]release|presentation|transcript|"
+    r"excerpt|supplement|section",
+    re.I,
+)
+
+FULL_ANNUAL_RE = re.compile(
+    r"annual[- ]report[- ]based[- ]on[- ](?:ifrs|us[- ]gaap)|"
+    r"annual[- ]report[- ].*(?:ifrs|us[- ]gaap)|"
+    r"integrated[- ]report|universal[- ]registration|"
+    r"download[- ]full[- ]report|form[- ]20[- ]f|20[- ]f|10[- ]k",
+    re.I,
+)
+
 
 def _host(url: str) -> str:
     return urlparse(url).netloc.split(":")[0].lower().removeprefix("www.")
@@ -92,6 +109,8 @@ def _candidate_score(c: dict) -> tuple[int, str]:
     text = (c.get("anchor_text") or "") + " " + c.get("url", "") + " " + c.get("source_page", "")
     low = text.lower()
     score = 0
+    if FULL_ANNUAL_RE.search(low):
+        score += 180
     if "annual report" in low or "annual-report" in low:
         score += 100
     if re.search(r"/financials/\d{4}\b", low) or re.search(r"/reports?/\d{4}\b", low):
@@ -100,9 +119,32 @@ def _candidate_score(c: dict) -> tuple[int, str]:
         score += 30
     if "ixbrl" in low or "pillar 3" in low or "transparency and disclosure" in low:
         score -= 80
+    if PARTIAL_REPORT_RE.search(low) and not FULL_ANNUAL_RE.search(low):
+        score -= 120
     if re.search(r"\bh[12]\b|half[- ]year|interim|business update|press release", low):
         score -= 20
     return (-score, c.get("url", ""))
+
+
+def _annual_report_score(p: dict) -> int:
+    text = f"{p.get('title') or ''} {p.get('anchor_text') or ''} {p.get('url') or ''} {p.get('source_page') or ''}"
+    low = text.lower()
+    score = 0
+    if FULL_ANNUAL_RE.search(low):
+        score += 200
+    if "download full report" in low:
+        score += 20
+    if re.search(r"based[- ]on[- ]ifrs|ifrs", low):
+        score += 60
+    if re.search(r"based[- ]on[- ]us[- ]gaap|us[- ]gaap", low):
+        score += 20
+    if "integrated report" in low:
+        score += 35
+    if "web_search" in low:
+        score += 10
+    if PARTIAL_REPORT_RE.search(low) and not FULL_ANNUAL_RE.search(low):
+        score -= 250
+    return score
 
 
 _GATE_PATH_RE = re.compile(r"/(age[-_ ]?gate|age[-_ ]?verification|age[-_ ]?check)\b", re.I)
@@ -312,8 +354,8 @@ CLASSIFY_SCHEMA = {
 
 
 def _classify_chunk(company_name: str, candidates: list[dict]) -> list[dict]:
-    # v2: tightened prompt to reject partial / supplementary PDFs.
-    key = "classify:v2:" + hashlib.sha256(
+    # v3: tightened prompt and deterministic post-processing reject partial PDFs.
+    key = "classify:v3:" + hashlib.sha256(
         (company_name + "|" + "|".join(sorted(c["url"] for c in candidates))).encode()
     ).hexdigest()
 
@@ -349,7 +391,11 @@ def _classify_chunk(company_name: str, candidates: list[dict]) -> list[dict]:
         meta = by_url.get(c["url"])
         if not meta:
             continue
-        enriched.append({**c, **meta})
+        merged = {**c, **meta}
+        text = f"{merged.get('title') or ''} {merged.get('anchor_text') or ''} {merged.get('url') or ''}"
+        if merged.get("kind") == "annual_report" and PARTIAL_REPORT_RE.search(text) and not FULL_ANNUAL_RE.search(text):
+            merged["kind"] = "other"
+        enriched.append(merged)
     return enriched
 
 
@@ -378,12 +424,10 @@ def _heuristic_classify(candidates: list[dict]) -> list[dict]:
             kind = "results_presentation"
         elif re.search(r"half[- ]year|interim|q[1-4]|quarter", low):
             kind = "interim_report"
-        elif re.search(
-            r"annual[- ]report|integrated[- ]report|annual[- ]review|universal[- ]registration|"
-            r"registration[- ]document|full[- ]year|year[- ]end|shareholder[- ]letter",
-            low,
-        ):
+        elif FULL_ANNUAL_RE.search(low):
             kind = "annual_report"
+        elif re.search(r"annual[- ]report|annual[- ]review|registration[- ]document", low):
+            kind = "other" if PARTIAL_REPORT_RE.search(low) else "annual_report"
 
         enriched.append(
             {
@@ -550,14 +594,19 @@ def annual_reports(classified: list[dict]) -> list[dict]:
     for p in classified:
         if p.get("kind") != "annual_report":
             continue
+        if _annual_report_score(p) < 0:
+            continue
         fy = p.get("fiscal_year")
         if not isinstance(fy, int):
             continue
-        # Prefer English when language is known.
         prev = by_year.get(fy)
         if prev is None:
             by_year[fy] = p
             continue
+        if _annual_report_score(p) > _annual_report_score(prev):
+            by_year[fy] = p
+            continue
+        # Prefer English when quality is otherwise tied and language is known.
         if (p.get("language") or "").lower().startswith("en") and not (
             (prev.get("language") or "").lower().startswith("en")
         ):
