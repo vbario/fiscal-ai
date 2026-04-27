@@ -58,12 +58,25 @@ def _statement_page_score(statement_type: str, text_norm: str) -> int:
     head = text_norm[:700]
     score = 0
     if statement_type == "income_statement":
-        if re.search(r"consolidated\s+statement\s+of\s+comprehensive\s+income", head, re.I):
-            score += 80
+        # The Profit & Loss / Income Statement / Statement of Operations is the
+        # primary income statement. "Statement of Comprehensive Income" is a
+        # supplementary page that often appears immediately after — it starts
+        # with the bottom-line "Net income" and adds OCI items. Score the
+        # primary statement higher so we don't accidentally pick the OCI page.
         if re.search(r"consolidated\s+(income\s+statement|statement\s+of\s+(profit\s+or\s+loss|operations))", head, re.I):
-            score += 80
+            score += 130
+        if re.search(r"consolidated\s+statement\s+of\s+comprehensive\s+income", head, re.I):
+            score += 50
+        # Revenue / sales / cost-of-sales anchors are a strong signal of the
+        # primary P&L page (vs. the OCI page which leads with "Net income").
+        if re.search(r"\b(net\s+sales|total\s+revenue|total\s+net\s+sales|cost\s+of\s+(sales|goods\s+sold|system\s+sales)|gross\s+profit|operating\s+(income|profit))\b", head, re.I):
+            score += 40
         if re.search(r"for\s+the\s+years?\s+ended|net\s+income|income\s+before", head, re.I):
             score += 25
+        # If the page's first ~250 chars start with "Net income" without any
+        # revenue-line preamble, it's almost certainly the OCI page.
+        if re.match(r"[^a-z]*consolidated\s+statement\s+of\s+comprehensive\s+income.*?net\s+income", head[:400], re.I | re.S):
+            score -= 60
     elif statement_type == "balance_sheet":
         if re.search(r"consolidated\s+(balance\s+sheet|statement\s+of\s+financial\s+position)", head, re.I):
             score += 90

@@ -312,7 +312,8 @@ CLASSIFY_SCHEMA = {
 
 
 def _classify_chunk(company_name: str, candidates: list[dict]) -> list[dict]:
-    key = "classify:" + hashlib.sha256(
+    # v2: tightened prompt to reject partial / supplementary PDFs.
+    key = "classify:v2:" + hashlib.sha256(
         (company_name + "|" + "|".join(sorted(c["url"] for c in candidates))).encode()
     ).hexdigest()
 
@@ -323,10 +324,20 @@ def _classify_chunk(company_name: str, candidates: list[dict]) -> list[dict]:
         f"For the public company '{company_name}', classify each of the following PDF links "
         "from its investor relations site. Use the URL and anchor text to determine the kind "
         "(annual_report, interim_report, results_presentation, press_release, sustainability, "
-        "governance, other) and the fiscal year. "
-        "Annual reports include 'Annual Report', 'Integrated Annual Report', 'Annual Review' "
-        "'Universal Registration Document', full-year results, and H2/full-year shareholder letters "
-        "when they contain the annual financial statements (but NOT sustainability reports). "
+        "governance, other) and the fiscal year.\n\n"
+        "Mark as 'annual_report' ONLY if the document is the FULL annual report containing the "
+        "complete audited consolidated financial statements (income statement, balance sheet, "
+        "cash flow statement). Examples: 'Annual Report', 'Integrated Annual Report', "
+        "'Annual Review', 'Universal Registration Document', '20-F', '10-K'.\n\n"
+        "Do NOT mark as 'annual_report' (use 'other' or 'interim_report' instead) any of these "
+        "partial / supplementary documents, even if the URL contains the words 'annual report':\n"
+        "  - 'financial-performance-section', 'financial highlights', 'highlights brochure'\n"
+        "  - 'Q1/Q2/Q3/Q4 financial statements', 'quarterly statements', 'X-month results'\n"
+        "  - 'press release', 'fact sheet', 'shareholder letter' (unless it contains the full statements)\n"
+        "  - 'sustainability report', 'ESG report', 'remuneration report'\n"
+        "  - 'corporate governance', 'compensation report'\n"
+        "  - 'investor presentation', 'capital markets day' deck\n"
+        "  - 'annual report excerpt', 'annual report supplement'\n"
         "Half-year and quarterly results are interim_report. "
         "If the year cannot be inferred from the URL/text, set fiscal_year to null."
         f"\n\nCandidates:\n{listing}"
@@ -474,16 +485,28 @@ def web_search_annual_reports(company_name: str, ir_url: str | None = None, max_
     site_hint = f" Their investor relations site is {ir_url}." if ir_url else ""
     prompt = (
         f"Find direct PDF download URLs for the most recent {max_years} annual reports of the public company "
-        f"'{company_name}'.{site_hint} Prefer the official annual report (integrated annual report, "
-        "universal registration document, full annual report, or annual review) that contains the audited "
-        "consolidated financial statements. Return one PDF per fiscal year, English version when available. "
-        "Each url MUST be a direct .pdf link that downloads a file. Do NOT return sustainability-only or "
-        "ESG-only reports, half-year/interim reports, presentations, or press releases."
+        f"'{company_name}'.{site_hint} Each URL MUST point to the FULL annual report that contains the "
+        "complete audited consolidated financial statements: income statement / statement of profit or loss, "
+        "balance sheet / statement of financial position, AND cash flow statement. "
+        "Acceptable document types: Annual Report, Integrated Annual Report, Annual Review, "
+        "Universal Registration Document, Form 20-F, Form 10-K. "
+        "Return one PDF per fiscal year, English version when available. "
+        "Each url MUST be a direct .pdf link that downloads a file.\n\n"
+        "Do NOT return ANY of these partial / supplementary documents, even if the URL contains "
+        "'annual report':\n"
+        "  - Financial highlights / performance-section excerpts\n"
+        "  - Q1/Q2/Q3/Q4 quarterly financial statements\n"
+        "  - Half-year / interim reports\n"
+        "  - Sustainability-only or ESG-only reports\n"
+        "  - Investor presentations, press releases, fact sheets\n"
+        "  - Corporate governance / remuneration / compensation reports\n"
+        "If the latest fiscal year only has a partial document published so far, SKIP that year rather "
+        "than returning the partial document."
     )
     out = llm.web_search_json(
         prompt,
         WEB_FALLBACK_SCHEMA,
-        cache_key="web_pdfs:" + hashlib.sha256(f"{company_name}|{ir_url}|{max_years}".encode()).hexdigest(),
+        cache_key="web_pdfs:v2:" + hashlib.sha256(f"{company_name}|{ir_url}|{max_years}".encode()).hexdigest(),
     )
     pdfs = out.get("pdfs", []) or []
     enriched: list[dict] = []
