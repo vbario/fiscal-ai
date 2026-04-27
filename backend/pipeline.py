@@ -139,7 +139,7 @@ def run_company(name: str, on_progress: ProgressFn) -> dict:
         return year, ext
 
     ctx = contextvars.copy_context()
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(ctx.run, _process, a): a for a in annuals}
         for fut in as_completed(futures):
             a = futures[fut]
