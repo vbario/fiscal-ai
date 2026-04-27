@@ -58,7 +58,7 @@ def _client() -> OpenAI:
     with _client_lock:
         c = _client_cache.get(key)
         if c is None:
-            c = OpenAI(api_key=key, timeout=300.0, max_retries=5)
+            c = OpenAI(api_key=key, timeout=90.0, max_retries=5)
             _client_cache[key] = c
         return c
 
