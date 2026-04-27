@@ -232,6 +232,10 @@
 </main>
 
 <script>
+// API base — derived from the path the page was loaded under, so the same
+// frontend works at "/" (local dev) and "/fiscalai/" (behind Firebase rewrite).
+const BASE = window.location.pathname.replace(/[^/]*$/, "");
+const apiUrl = (p) => BASE + (p.startsWith("/") ? p.slice(1) : p);
 const $ = (s, r=document) => r.querySelector(s);
 const $$ = (s, r=document) => [...r.querySelectorAll(s)];
 const STMT_LABELS = {
@@ -277,7 +281,7 @@ const settings = {
 
 async function initSettings() {
   try {
-    const r = await fetch("/api/models");
+    const r = await fetch(apiUrl("/api/models"));
     const j = await r.json();
     settings.models = j.models || [];
     settings.defaultModel = j.default || (settings.models[0] && settings.models[0].id) || "";
@@ -343,7 +347,7 @@ async function run() {
   $("#run").disabled = true;
   updateStatus("Starting report…");
 
-  const r = await fetch("/api/reports", {
+  const r = await fetch(apiUrl("/api/reports"), {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({companies, ...reqOverrides()}),
@@ -360,7 +364,7 @@ async function run() {
 
 function openEventStream(jobId, since) {
   if (state.eventSource) state.eventSource.close();
-  const es = new EventSource(`/api/reports/${jobId}/events?since=${since || 0}`);
+  const es = new EventSource(apiUrl(`/api/reports/${jobId}/events?since=${since || 0}`));
   state.eventSource = es;
   es.addEventListener("progress", e => { state.eventCount += 1; onProgress(JSON.parse(e.data)); });
   es.addEventListener("cost_update", e => { state.eventCount += 1; onCostUpdate(JSON.parse(e.data)); });
@@ -487,7 +491,7 @@ async function onCompanyError(ev) {
 
 async function refreshCurrentReport() {
   if (!state.jobId) return null;
-  const r = await fetch(`/api/reports/${state.jobId}`);
+  const r = await fetch(apiUrl(`/api/reports/${state.jobId}`));
   if (!r.ok) return null;
   const j = await r.json();
   state.results = j.results || {};
@@ -560,7 +564,7 @@ function renderResult() {
 
 function exportActiveCompany() {
   if (!state.jobId || !state.activeCompany) return;
-  const url = `/api/reports/${encodeURIComponent(state.jobId)}/companies/${encodeURIComponent(state.activeCompany)}/export.pdf`;
+  const url = apiUrl(`/api/reports/${encodeURIComponent(state.jobId)}/companies/${encodeURIComponent(state.activeCompany)}/export.pdf`);
   window.open(url, "_blank", "noopener");
 }
 
@@ -576,7 +580,7 @@ async function retryActiveCompany() {
   updateStatus(`${company}: retrying report…`);
 
   try {
-    const r = await fetch(`/api/reports/${encodeURIComponent(state.jobId)}/companies/${encodeURIComponent(company)}/retry`, {
+    const r = await fetch(apiUrl(`/api/reports/${encodeURIComponent(state.jobId)}/companies/${encodeURIComponent(company)}/retry`), {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(reqOverrides()),
@@ -680,7 +684,7 @@ function renderCost(j) {
 
 async function refreshCost() {
   try {
-    const r = await fetch("/api/cost");
+    const r = await fetch(apiUrl("/api/cost"));
     if (!r.ok) return;
     const j = await r.json();
     if (state.running && state.cost && Number(j.usd || 0) > Number(state.cost.usd || 0)) {
@@ -691,7 +695,7 @@ async function refreshCost() {
 }
 
 $("#cost-reset").addEventListener("click", async () => {
-  await fetch("/api/cost/reset", {method: "POST"});
+  await fetch(apiUrl("/api/cost/reset"), {method: "POST"});
   refreshCost();
 });
 
@@ -700,7 +704,7 @@ setInterval(refreshCost, 2000);
 
 async function loadSavedReports() {
   try {
-    const r = await fetch("/api/reports");
+    const r = await fetch(apiUrl("/api/reports"));
     if (!r.ok) return;
     const j = await r.json();
     state.savedReports = j.reports || [];
@@ -725,7 +729,7 @@ async function loadSavedReports() {
 async function loadSelectedSavedReport() {
   const jobId = $("#saved-reports").value;
   if (!jobId) return;
-  const r = await fetch(`/api/reports/${jobId}?include_events=1`);
+  const r = await fetch(apiUrl(`/api/reports/${jobId}?include_events=1`));
   if (!r.ok) return;
   const j = await r.json();
   state.jobId = j.job_id;

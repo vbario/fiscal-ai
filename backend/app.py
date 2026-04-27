@@ -445,3 +445,23 @@ async def index():
 
 
 app.mount("/static", StaticFiles(directory=str(FRONTEND)), name="static")
+
+
+# When deployed behind a path-based reverse proxy (e.g. Firebase Hosting
+# rewriting /fiscalai/** to this Cloud Run service), Firebase forwards the
+# full path. Mount the entire app under URL_PREFIX so /fiscalai/api/... routes
+# resolve correctly. Local runs leave URL_PREFIX unset and serve at "/".
+import os as _os
+_url_prefix = _os.environ.get("URL_PREFIX", "").rstrip("/")
+if _url_prefix:
+    _inner = app
+    _root = FastAPI(title="Fiscal AI (root)")
+
+    # Serve the bare prefix path (e.g. /fiscalai) directly so we don't rely on
+    # Starlette's Mount-issued 307, which would redirect to the Cloud Run host.
+    @_root.get(_url_prefix)
+    async def _prefix_index():
+        return FileResponse(FRONTEND / "index.html")
+
+    _root.mount(_url_prefix, _inner)
+    app = _root
